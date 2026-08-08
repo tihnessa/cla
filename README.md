@@ -1,8 +1,8 @@
 # clp
 
 A simple, cross-platform command-line audio player for Python 3.9 and newer.
-It starts playback in the background and immediately returns control to the
-terminal.
+It plays a file or folder in the background and immediately returns control to
+the terminal.
 
 ## Requirements
 
@@ -28,19 +28,38 @@ Play a local audio file:
 clp path/to/audio.mp3
 ```
 
+Play the supported audio files directly inside a folder:
+
+```bash
+clp path/to/album
+```
+
+Folder playback is non-recursive. It considers regular files with these
+case-insensitive extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.aac`, and
+`.m4a`.
+
+When every playable file has valid track metadata, files are ordered by disc
+number, track number, and then natural filename order. Container metadata is
+preferred over audio-stream metadata, and a missing disc number defaults to
+disc 1. If any playable file lacks a valid track number, the entire folder uses
+case-insensitive natural filename order, so `track2.mp3` precedes
+`track10.mp3`.
+
 The command produces no output when playback starts successfully. It validates
-the file with `ffprobe`, launches audio-only `ffplay` in the background, and
-returns immediately. Playback does not need to continue after the originating
-terminal closes.
+files with `ffprobe`, launches audio-only `ffplay` in the background, and
+returns immediately. Folder tracks play sequentially. Playback does not need to
+continue after the originating terminal closes.
 
 Supported formats depend on the installed FFmpeg build. Typical builds support
 WAV, MP3, FLAC, OGG/Vorbis, and AAC/M4A. URLs, playlists, and playback controls
 are not supported.
 
-Errors are written to standard error for missing or unreadable files, missing
-FFmpeg tools, invalid or audio-less media, validation timeouts, and failures to
-start playback. Errors that occur inside `ffplay` after startup may appear in
-the terminal asynchronously.
+Errors are written to standard error for missing or unreadable paths, folders
+without matching files, missing FFmpeg tools, invalid or audio-less media,
+validation timeouts, and failures to start playback. During folder playback, a
+bad file produces an asynchronous warning and later tracks continue. Errors
+that occur inside `ffplay` after startup may also appear in the terminal
+asynchronously.
 
 ## Development
 
