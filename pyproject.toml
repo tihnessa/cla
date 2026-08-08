@@ -1,13 +1,16 @@
 [project]
 name = "clp"
 version = "0.1.0"
-description = "A Python project."
+description = "A simple command-line audio player."
 readme = "README.md"
 authors = [
     { name = "David Shaw", email = "dshaw1@dstl.gov.uk" }
 ]
 requires-python = ">=3.9"
 dependencies = []
+
+[project.scripts]
+clp = "clp.cli:main"
 
 [dependency-groups]
 dev = [
