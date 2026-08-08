@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -5,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from clp.cli import FFMPEG_DOWNLOAD_URL, main
+from clp.cli import FFMPEG_DOWNLOAD_URL, ProbeResult, _probe_audio, main
 
 
 def _install_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -14,7 +15,8 @@ def _install_tools(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _successful_probe() -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess([], 0, stdout="audio\n", stderr="")
+    output = {"streams": [{"codec_type": "audio"}], "format": {}}
+    return subprocess.CompletedProcess([], 0, stdout=json.dumps(output), stderr="")
 
 
 def test_help_exits_successfully(capsys: pytest.CaptureFixture[str]) -> None:
@@ -22,7 +24,7 @@ def test_help_exits_successfully(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
 
     assert error.value.code == 0
-    assert "audio_file" in capsys.readouterr().out
+    assert "path" in capsys.readouterr().out
 
 
 def test_audio_file_is_required() -> None:
@@ -32,18 +34,27 @@ def test_audio_file_is_required() -> None:
     assert error.value.code == 2
 
 
-@pytest.mark.parametrize("kind", ["missing", "directory"])
-def test_rejects_paths_that_are_not_files(
-    kind: str,
+def test_rejects_missing_path(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    path = tmp_path / kind
-    if kind == "directory":
-        path.mkdir()
+    path = tmp_path / "missing"
 
     assert main([str(path)]) == 1
-    assert "not a readable file" in capsys.readouterr().err
+    assert "not a readable file or directory" in capsys.readouterr().err
+
+
+def test_rejects_path_when_status_cannot_be_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "sample.mp3"
+    path.touch()
+    monkeypatch.setattr(Path, "is_file", Mock(side_effect=PermissionError))
+
+    assert main([str(path)]) == 1
+    assert "not a readable file or directory" in capsys.readouterr().err
 
 
 def test_rejects_unreadable_file(
@@ -187,9 +198,9 @@ def test_probes_and_starts_playback_in_background(
             "-select_streams",
             "a:0",
             "-show_entries",
-            "stream=codec_type",
+            "stream=codec_type:stream_tags=track,disc:format_tags=track,disc",
             "-of",
-            "default=noprint_wrappers=1:nokey=1",
+            "json",
             absolute_path,
         ],
         capture_output=True,
@@ -224,3 +235,64 @@ def test_probes_and_starts_playback_in_background(
         ],
         **expected_options,
     )
+
+
+def test_probe_prefers_container_track_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "sample.mp3"
+    output = {
+        "streams": [{"codec_type": "audio", "tags": {"track": "8/12", "disc": "2/2"}}],
+        "format": {"tags": {"TRACK": "3/12", "DISC": "1/2"}},
+    }
+    monkeypatch.setattr(
+        "clp.cli.subprocess.run",
+        Mock(
+            return_value=subprocess.CompletedProcess(
+                [], 0, stdout=json.dumps(output), stderr=""
+            )
+        ),
+    )
+
+    assert _probe_audio("/tools/ffprobe", path) == ProbeResult(track=3, disc=1)
+
+
+def test_probe_falls_back_to_stream_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "sample.flac"
+    output = {
+        "streams": [{"codec_type": "audio", "tags": {"track": "4", "disc": "2"}}],
+        "format": {"tags": {"track": "not-a-number"}},
+    }
+    monkeypatch.setattr(
+        "clp.cli.subprocess.run",
+        Mock(
+            return_value=subprocess.CompletedProcess(
+                [], 0, stdout=json.dumps(output), stderr=""
+            )
+        ),
+    )
+
+    assert _probe_audio("/tools/ffprobe", path) == ProbeResult(track=4, disc=2)
+
+
+def test_probe_rejects_malformed_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "sample.mp3"
+    monkeypatch.setattr(
+        "clp.cli.subprocess.run",
+        Mock(
+            return_value=subprocess.CompletedProcess(
+                [], 0, stdout="not json", stderr=""
+            )
+        ),
+    )
+
+    result = _probe_audio("/tools/ffprobe", path)
+
+    assert result.error == "FFprobe returned invalid metadata"
