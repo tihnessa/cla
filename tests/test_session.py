@@ -39,6 +39,50 @@ def test_session_descriptor_round_trip_and_token_safe_cleanup(
     assert not session_file.exists()
 
 
+def test_token_safe_cleanup_cannot_delete_a_replacement_session(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_session(43210, "stale")
+    stale_read = threading.Event()
+    continue_cleanup = threading.Event()
+    replacement_published = threading.Event()
+
+    original_read_session = read_session
+
+    def pause_after_stale_read():
+        descriptor = original_read_session()
+        if threading.current_thread().name == "stale-cleanup":
+            stale_read.set()
+            assert continue_cleanup.wait(timeout=2)
+        return descriptor
+
+    monkeypatch.setattr("cla.session.read_session", pause_after_stale_read)
+
+    cleanup = threading.Thread(
+        target=clear_session, args=("stale",), name="stale-cleanup"
+    )
+
+    def publish_replacement() -> None:
+        publish_session(43211, "replacement")
+        replacement_published.set()
+
+    replacement = threading.Thread(target=publish_replacement)
+    cleanup.start()
+    assert stale_read.wait(timeout=2)
+    replacement.start()
+    assert not replacement_published.wait(timeout=0.05)
+
+    continue_cleanup.set()
+    cleanup.join(timeout=2)
+    replacement.join(timeout=2)
+
+    assert not cleanup.is_alive()
+    assert not replacement.is_alive()
+    descriptor = original_read_session()
+    assert descriptor is not None
+    assert descriptor.token == "replacement"
+
+
 def test_playback_launch_lock_serializes_concurrent_launches(
     session_file: Path,
 ) -> None:

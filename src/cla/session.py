@@ -67,6 +67,11 @@ def _launch_lock_path() -> Path:
     return session_path.with_name(f"{session_path.name}.launch.lock")
 
 
+def _descriptor_lock_path() -> Path:
+    session_path = _session_path()
+    return session_path.with_name(f"{session_path.name}.descriptor.lock")
+
+
 def _acquire_windows_lock(lock_file: object, msvcrt: object) -> None:
     """Wait until byte zero can be locked, without the CRT's retry limit."""
     while True:
@@ -103,6 +108,37 @@ def playback_launch_lock() -> Iterator[None]:
             # PermissionError when another Windows process owns that region.
             # Inspect file metadata instead; only an uninitialized lock file
             # needs a byte appended before any process can lock it.
+            if os.fstat(lock_file.fileno()).st_size == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            _acquire_windows_lock(lock_file, msvcrt)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _session_descriptor_lock() -> Iterator[None]:
+    """Serialize descriptor replacement and token-checked removal."""
+    path = _descriptor_lock_path()
+    with path.open("a+b") as lock_file:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        if os.name == "nt":
+            import msvcrt
+
             if os.fstat(lock_file.fileno()).st_size == 0:
                 lock_file.write(b"\0")
                 lock_file.flush()
@@ -175,7 +211,8 @@ def publish_session(port: int, token: str) -> SessionDescriptor:
             temporary.chmod(0o600)
         except OSError:
             pass
-        os.replace(temporary, destination)
+        with _session_descriptor_lock():
+            os.replace(temporary, destination)
     except OSError:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -184,13 +221,16 @@ def publish_session(port: int, token: str) -> SessionDescriptor:
 
 
 def clear_session(token: Optional[str] = None) -> None:
-    """Remove a stale descriptor, optionally only when its token matches."""
+    """Remove matching stale state, or malformed state when no token is given."""
     path = _session_path()
-    if token is not None:
+    with _session_descriptor_lock():
         descriptor = read_session()
-        if descriptor is None or descriptor.token != token:
+        if token is None:
+            if descriptor is not None:
+                return
+        elif descriptor is None or descriptor.token != token:
             return
-    path.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
 
 
 def _receive_line(connection: socket.socket) -> bytes:
