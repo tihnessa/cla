@@ -2,6 +2,7 @@ import errno
 import json
 import os
 import socket
+import stat
 import threading
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 from cla.session import (
     _acquire_windows_lock,
+    _session_path,
     clear_session,
     playback_launch_lock,
     publish_session,
@@ -37,6 +39,41 @@ def test_session_descriptor_round_trip_and_token_safe_cleanup(
     assert session_file.exists()
     clear_session("secret")
     assert not session_file.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode regression")
+def test_default_session_state_uses_a_private_runtime_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLA_SESSION_FILE")
+    monkeypatch.setattr("cla.session.tempfile.gettempdir", lambda: str(tmp_path))
+
+    session_path = _session_path()
+
+    assert session_path.name == "session.json"
+    assert session_path.parent.parent == tmp_path
+    metadata = session_path.parent.stat()
+    assert stat.S_ISDIR(metadata.st_mode)
+    assert metadata.st_uid == os.getuid()
+    assert stat.S_IMODE(metadata.st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink regression")
+def test_launch_lock_does_not_follow_or_chmod_a_symlink(
+    session_file: Path, tmp_path: Path
+) -> None:
+    victim = tmp_path / "victim"
+    victim.write_text("untouched", encoding="utf-8")
+    victim.chmod(0o755)
+    lock_path = session_file.with_name(f"{session_file.name}.launch.lock")
+    lock_path.symlink_to(victim)
+
+    with pytest.raises(OSError):
+        with playback_launch_lock():
+            pass
+
+    assert victim.read_text(encoding="utf-8") == "untouched"
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o755
 
 
 def test_token_safe_cleanup_cannot_delete_a_replacement_session(

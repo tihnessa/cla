@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import socket
+import stat
 import tempfile
 import time
 from collections.abc import Iterator
@@ -59,7 +60,29 @@ def _session_path() -> Path:
         return Path(override)
     identity = f"{getpass.getuser()}:{Path.home()}".encode()
     suffix = hashlib.sha256(identity).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f"cla-session-{suffix}.json"
+    runtime_directory = Path(tempfile.gettempdir()) / f"cla-{suffix}"
+    _ensure_private_directory(runtime_directory)
+    return runtime_directory / "session.json"
+
+
+def _ensure_private_directory(path: Path) -> None:
+    """Create and validate a directory accessible only to the current user."""
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise OSError(f"playback runtime path is not a directory: {path}")
+    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        raise PermissionError(
+            f"playback runtime directory is not owned by this user: {path}"
+        )
+    if os.name != "nt" and stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise PermissionError(
+            f"playback runtime directory does not have mode 0700: {path}"
+        )
 
 
 def _launch_lock_path() -> Path:
@@ -70,6 +93,38 @@ def _launch_lock_path() -> Path:
 def _descriptor_lock_path() -> Path:
     session_path = _session_path()
     return session_path.with_name(f"{session_path.name}.descriptor.lock")
+
+
+@contextmanager
+def _open_lock_file(path: Path) -> Iterator[object]:
+    """Safely create a private regular lock file without following symlinks."""
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if no_follow:
+        flags |= no_follow
+    else:
+        try:
+            if stat.S_ISLNK(path.lstat().st_mode):
+                raise OSError(f"playback lock path is a symbolic link: {path}")
+        except FileNotFoundError:
+            pass
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"playback lock path is not a regular file: {path}")
+        if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+            raise PermissionError(
+                f"playback lock file is not owned by this user: {path}"
+            )
+        if os.name != "nt" and stat.S_IMODE(metadata.st_mode) != 0o600:
+            raise PermissionError(f"playback lock file is not private: {path}")
+        with os.fdopen(descriptor, "r+b") as lock_file:
+            descriptor = -1
+            yield lock_file
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _acquire_windows_lock(lock_file: object, msvcrt: object) -> None:
@@ -96,11 +151,7 @@ def _acquire_windows_lock(lock_file: object, msvcrt: object) -> None:
 def playback_launch_lock() -> Iterator[None]:
     """Serialize replacement and startup of the per-user playback worker."""
     path = _launch_lock_path()
-    with path.open("a+b") as lock_file:
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+    with _open_lock_file(path) as lock_file:
         if os.name == "nt":
             import msvcrt
 
@@ -131,11 +182,7 @@ def playback_launch_lock() -> Iterator[None]:
 def _session_descriptor_lock() -> Iterator[None]:
     """Serialize descriptor replacement and token-checked removal."""
     path = _descriptor_lock_path()
-    with path.open("a+b") as lock_file:
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+    with _open_lock_file(path) as lock_file:
         if os.name == "nt":
             import msvcrt
 
