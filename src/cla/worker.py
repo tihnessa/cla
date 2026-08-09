@@ -23,7 +23,9 @@ from cla.session import (
     PlaybackStatus,
     clear_session,
     encode_response,
+    is_seek_command,
     new_token,
+    parse_seek_command,
     publish_session,
 )
 
@@ -182,9 +184,14 @@ class PlaybackController:
 
     def handle(self, command: str) -> ControlResponse:
         """Apply one public playback command."""
+        seek = parse_seek_command(command)
         canonical = COMMAND_ALIASES.get(command)
         if canonical is None:
-            return ControlResponse(False, "unknown playback command")
+            if not is_seek_command(command):
+                return ControlResponse(False, "unknown playback command")
+            if seek is None:
+                return ControlResponse(True)
+            canonical = seek[0]
         if canonical == "status":
             return ControlResponse(
                 True,
@@ -223,10 +230,19 @@ class PlaybackController:
             return self._select(0)
 
         position = self._position()
-        new_offset = max(0.0, position - 10.0) if canonical == "rw" else position + 10.0
+        assert seek is not None
+        seconds = seek[1]
+        if canonical == "rw":
+            new_offset = 0.0 if seconds >= position else position - seconds
+            crosses_boundary = False
+        else:
+            crosses_boundary = seconds >= self.current.duration - position
+            new_offset = (
+                self.current.duration if crosses_boundary else position + seconds
+            )
         was_paused = self.paused
         self._terminate()
-        if canonical == "ff" and new_offset >= self.current.duration:
+        if canonical == "ff" and crosses_boundary:
             if self.index == len(self.tracks) - 1:
                 self.stopped = True
                 return ControlResponse(True)

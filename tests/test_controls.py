@@ -162,6 +162,38 @@ def test_rewind_clamps_and_preserves_paused_state(controller) -> None:
     assert len(processes) == 1
 
 
+def test_custom_seek_uses_requested_positive_whole_seconds(controller) -> None:
+    player, now, processes = controller
+    now[0] += 12
+    player.handle("pause")
+
+    assert player.handle("rw7").ok
+    assert player.offset == 5
+    assert player.paused
+    assert len(processes) == 1
+
+    assert player.handle("rw20").ok
+    assert player.offset == 0
+
+    assert player.handle("ff19").ok
+    assert player.offset == 19
+    assert player.paused
+    assert len(processes) == 1
+
+
+@pytest.mark.parametrize("command", ["ff0", "rw-5", "ffabc", "rw1.5"])
+def test_invalid_custom_seek_is_a_no_op(command: str, controller) -> None:
+    player, now, processes = controller
+    now[0] += 6
+    player.handle("pause")
+
+    assert player.handle(command).ok
+    assert player.offset == 6
+    assert player.index == 0
+    assert player.paused
+    assert len(processes) == 1
+
+
 def test_removed_rew_command_is_rejected_by_worker(controller) -> None:
     player, _, _ = controller
 
@@ -175,13 +207,13 @@ def test_fast_forward_crosses_tracks_and_stops_after_final_track(controller) -> 
     player, now, processes = controller
     now[0] += 15
 
-    assert player.handle("ff").ok
+    assert player.handle("ff5").ok
     assert player.index == 1
     assert player.offset == 0
     assert processes[-1][0][-1] == "track2.mp3"
 
     now[0] += 25
-    assert player.handle("ff").ok
+    assert player.handle("ff5").ok
     assert player.stopped
 
 
@@ -317,6 +349,57 @@ def test_bare_control_command_wins_over_a_colliding_directory(
 
     assert main(["next"]) == 0
     request.assert_called_once_with("next")
+
+
+@pytest.mark.parametrize("command", ["ff20", "rw30"])
+def test_custom_seek_command_wins_over_a_colliding_file(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / command).touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli.send_command", request)
+
+    assert main([command]) == 0
+    request.assert_called_once_with(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["ff0", "rw0", "ff-5", "rwabc", "ff1.5", "ff" + "9" * 5000],
+)
+def test_invalid_custom_seek_is_ignored_before_filesystem_handling(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if len(command) < 100:
+        (tmp_path / command).touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock()
+    tools = Mock(side_effect=AssertionError("filesystem handling was reached"))
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr("cla.cli._tools", tools)
+
+    assert main([command]) == 0
+    request.assert_not_called()
+    tools.assert_not_called()
+
+
+def test_qualified_custom_seek_name_remains_a_filesystem_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "ff20").touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock()
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr(
+        "cla.cli._tools", Mock(return_value=(None, None, "filesystem target"))
+    )
+
+    assert main(["./ff20"]) == 1
+    assert "filesystem target" in capsys.readouterr().err
+    request.assert_not_called()
 
 
 def test_cli_prints_boundary_and_reports_missing_session(

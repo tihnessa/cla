@@ -38,6 +38,35 @@ COMMAND_ALIASES = {
     "status": "status",
 }
 CONTROL_COMMANDS = frozenset(COMMAND_ALIASES)
+SEEK_COMMANDS = ("ff", "rw")
+DEFAULT_SEEK_SECONDS = 10
+# Leave room for the token and JSON envelope in a control-protocol message.
+MAX_SEEK_COMMAND_BYTES = MAX_MESSAGE_BYTES - 128
+
+
+def is_seek_command(command: str) -> bool:
+    """Return whether an unqualified token is reserved for seeking."""
+    return command.startswith(SEEK_COMMANDS)
+
+
+def parse_seek_command(command: str) -> Optional[tuple[str, int]]:
+    """Parse a valid seek token into its direction and whole-second offset."""
+    for direction in SEEK_COMMANDS:
+        if command == direction:
+            return direction, DEFAULT_SEEK_SECONDS
+        if not command.startswith(direction):
+            continue
+        suffix = command[len(direction) :]
+        if (
+            not suffix
+            or not suffix.isascii()
+            or not suffix.isdecimal()
+            or len(command.encode("ascii")) > MAX_SEEK_COMMAND_BYTES
+        ):
+            return None
+        seconds = int(suffix)
+        return (direction, seconds) if seconds > 0 else None
+    return None
 
 
 @dataclass(frozen=True)

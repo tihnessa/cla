@@ -22,6 +22,8 @@ from cla.session import (
     CONTROL_TIMEOUT_SECONDS,
     ControlResponse,
     SessionDescriptor,
+    is_seek_command,
+    parse_seek_command,
     playback_launch_lock,
     read_session,
     send_command,
@@ -60,8 +62,8 @@ def _parser() -> argparse.ArgumentParser:
         prog="cla",
         description="Play local audio in the background or control active playback.",
         epilog=(
-            "controls: pause, play, skip/next, back/prev, ff, rw, replay, "
-            "restart, kill, status"
+            "controls: pause, play, skip/next, back/prev, ff[seconds], "
+            "rw[seconds], replay, restart, kill, status"
         ),
     )
     parser.add_argument(
@@ -660,7 +662,10 @@ def _tools() -> tuple[Optional[str], Optional[str], Optional[str]]:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Validate a file or folder and start background playback."""
     argument = _parser().parse_args(argv).target
-    if argument in CONTROL_COMMANDS:
+    unqualified_seek = Path(argument).name == argument and is_seek_command(argument)
+    if argument in CONTROL_COMMANDS or (
+        unqualified_seek and parse_seek_command(argument) is not None
+    ):
         response = _send_control(argument)
         if argument == "status":
             if response.unavailable:
@@ -680,6 +685,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _error(response.message or "playback control failed")
         if response.message is not None:
             print(f"cla: {response.message}")
+        return 0
+    if unqualified_seek:
         return 0
 
     target = Path(argument)

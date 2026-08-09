@@ -37,7 +37,8 @@ def test_help_exits_successfully(capsys: pytest.CaptureFixture[str]) -> None:
     assert error.value.code == 0
     help_text = capsys.readouterr().out
     assert "path" in help_text
-    assert "rw" in help_text
+    assert "ff[seconds]" in help_text
+    assert "rw[seconds]" in help_text
     assert "rew" not in help_text
 
 
