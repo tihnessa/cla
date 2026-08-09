@@ -19,6 +19,8 @@ from typing import Optional
 from cla.session import (
     CONTROL_COMMANDS,
     CONTROL_TIMEOUT_SECONDS,
+    ControlResponse,
+    SessionDescriptor,
     playback_launch_lock,
     read_session,
     send_command,
@@ -46,7 +48,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cla",
         description="Play local audio in the background or control active playback.",
-        epilog=("controls: pause, play, skip/next, back/prev, ff, rw, replay, restart"),
+        epilog=(
+            "controls: pause, play, skip/next, back/prev, ff, rw, replay, restart, kill"
+        ),
     )
     parser.add_argument(
         "target",
@@ -430,6 +434,21 @@ def _stop_windows_worker_tree(process: object) -> None:
     process.wait(timeout=WORKER_STOP_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
 
 
+def _wait_for_session_shutdown(
+    descriptor: SessionDescriptor, timeout_message: str
+) -> Optional[str]:
+    """Wait for one identified worker to remove its session descriptor."""
+    deadline = time.monotonic() + CONTROL_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        current = read_session()
+        if current is None:
+            return None
+        if current.token != descriptor.token:
+            return "another playback session became active"
+        time.sleep(STARTUP_POLL_INTERVAL_SECONDS)
+    return timeout_message
+
+
 def _stop_existing_session() -> Optional[str]:
     descriptor = read_session()
     if descriptor is None:
@@ -441,15 +460,20 @@ def _stop_existing_session() -> Optional[str]:
             return response.message or "could not stop existing playback session"
         return None
 
-    deadline = time.monotonic() + CONTROL_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        current = read_session()
-        if current is None:
-            return None
-        if current.token != descriptor.token:
-            return "another playback session became active"
-        time.sleep(STARTUP_POLL_INTERVAL_SECONDS)
-    return "existing playback session did not shut down"
+    return _wait_for_session_shutdown(
+        descriptor, "existing playback session did not shut down"
+    )
+
+
+def _send_control(command: str) -> ControlResponse:
+    """Send a public control, waiting for kill to finish session cleanup."""
+    descriptor = read_session() if command == "kill" else None
+    response = send_command(command)
+    if command != "kill" or not response.ok or descriptor is None:
+        return response
+
+    error = _wait_for_session_shutdown(descriptor, "playback session did not shut down")
+    return response if error is None else ControlResponse(False, error)
 
 
 def _tools() -> tuple[Optional[str], Optional[str], Optional[str]]:
@@ -480,7 +504,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     """Validate a file or folder and start background playback."""
     argument = _parser().parse_args(argv).target
     if argument in CONTROL_COMMANDS:
-        response = send_command(argument)
+        response = _send_control(argument)
         if not response.ok:
             return _error(response.message or "playback control failed")
         if response.message is not None:

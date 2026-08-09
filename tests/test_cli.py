@@ -118,6 +118,24 @@ def test_removed_rew_token_can_address_a_real_file(
     request.assert_not_called()
 
 
+def test_qualified_kill_name_remains_a_filesystem_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "kill").touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock()
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr(
+        "cla.cli._tools", Mock(return_value=(None, None, "filesystem target"))
+    )
+
+    assert main(["./kill"]) == 1
+    assert "filesystem target" in capsys.readouterr().err
+    request.assert_not_called()
+
+
 def test_rejects_path_when_status_cannot_be_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

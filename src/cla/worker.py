@@ -180,6 +180,9 @@ class PlaybackController:
         canonical = COMMAND_ALIASES.get(command)
         if canonical is None:
             return ControlResponse(False, "unknown playback command")
+        if canonical == "kill":
+            self.shutdown()
+            return ControlResponse(True)
         if canonical == "pause":
             if self.paused:
                 return ControlResponse(True)

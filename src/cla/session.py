@@ -23,6 +23,7 @@ MAX_MESSAGE_BYTES = 4096
 CONTROL_TIMEOUT_SECONDS = 5.0
 WINDOWS_LOCK_RETRY_SECONDS = 0.05
 COMMAND_ALIASES = {
+    "kill": "kill",
     "skip": "next",
     "next": "next",
     "back": "prev",

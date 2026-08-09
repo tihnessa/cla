@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 
 from cla.session import (
+    ControlResponse,
     _acquire_windows_lock,
     _session_path,
     clear_session,
@@ -350,6 +351,39 @@ def test_worker_serves_controls_over_loopback_and_cleans_up(
 
     assert not worker.is_alive()
     assert result == [0]
+    assert not session_file.exists()
+
+
+def test_kill_stops_worker_and_cleans_up_session(
+    session_file: Path, tmp_path: Path
+) -> None:
+    process = Mock(returncode=None)
+    process.poll.side_effect = lambda: process.returncode
+    process.terminate.side_effect = lambda: setattr(process, "returncode", -15)
+    process.wait.side_effect = lambda timeout=None: process.returncode
+    controller = PlaybackController(
+        "/tools/ffplay",
+        [
+            Track(Path("one.mp3"), track=1, disc=1, duration=60.0),
+            Track(Path("two.mp3"), track=2, disc=1, duration=60.0),
+        ],
+        popen=Mock(return_value=process),
+    )
+    result = []
+    worker = threading.Thread(target=lambda: result.append(_serve(controller)))
+    worker.start()
+    deadline = time.monotonic() + 2
+    while read_session() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    response = send_command("kill")
+    worker.join(timeout=2)
+
+    assert response == ControlResponse(True)
+    assert not worker.is_alive()
+    assert result == [0]
+    assert controller.index == 0
+    process.terminate.assert_called_once_with()
     assert not session_file.exists()
 
 
