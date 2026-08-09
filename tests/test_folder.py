@@ -142,6 +142,7 @@ def test_manifest_preserves_unicode_paths(tmp_path: Path) -> None:
         "files": [str(files[0])],
         "ffprobe": "/tools/ffprobe",
         "ffplay": "/tools/ffplay",
+        "input_order_authoritative": False,
     }
 
 
