@@ -7,7 +7,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from cla.session import clear_session, publish_session, read_session, send_command
+from cla.session import (
+    clear_session,
+    playback_launch_lock,
+    publish_session,
+    read_session,
+    send_command,
+)
 from cla.worker import PlaybackController, Track, _serve
 
 
@@ -28,6 +34,41 @@ def test_session_descriptor_round_trip_and_token_safe_cleanup(
     assert session_file.exists()
     clear_session("secret")
     assert not session_file.exists()
+
+
+def test_playback_launch_lock_serializes_concurrent_launches(
+    session_file: Path,
+) -> None:
+    first_acquired = threading.Event()
+    release_first = threading.Event()
+    second_attempted = threading.Event()
+    second_acquired = threading.Event()
+
+    def hold_first_lock() -> None:
+        with playback_launch_lock():
+            first_acquired.set()
+            assert release_first.wait(timeout=2)
+
+    def acquire_second_lock() -> None:
+        assert first_acquired.wait(timeout=2)
+        second_attempted.set()
+        with playback_launch_lock():
+            second_acquired.set()
+
+    first = threading.Thread(target=hold_first_lock)
+    second = threading.Thread(target=acquire_second_lock)
+    first.start()
+    second.start()
+    assert second_attempted.wait(timeout=2)
+    assert not second_acquired.wait(timeout=0.05)
+
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert second_acquired.is_set()
 
 
 def test_stale_session_is_removed_when_connection_fails(

@@ -47,7 +47,9 @@ cla replay      # restart the current track
 cla restart     # restart the playlist from its first track
 ```
 
-Starting another file or folder stops and replaces the current session.
+Starting another file or folder stops and replaces the current session. Concurrent
+launch requests are serialized through replacement and startup, so only the most
+recent ready worker remains active.
 Navigation never wraps or changes the established playlist order. `skip` on
 the final track and `back` on the first track leave playback unchanged and
 print a clear message. Navigation, `replay`, and `restart` start the selected

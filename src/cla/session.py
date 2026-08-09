@@ -7,6 +7,8 @@ import os
 import secrets
 import socket
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -55,6 +57,43 @@ def _session_path() -> Path:
     identity = f"{getpass.getuser()}:{Path.home()}".encode()
     suffix = hashlib.sha256(identity).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / f"cla-session-{suffix}.json"
+
+
+def _launch_lock_path() -> Path:
+    session_path = _session_path()
+    return session_path.with_name(f"{session_path.name}.launch.lock")
+
+
+@contextmanager
+def playback_launch_lock() -> Iterator[None]:
+    """Serialize replacement and startup of the per-user playback worker."""
+    path = _launch_lock_path()
+    with path.open("a+b") as lock_file:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0)
+            if lock_file.read(1) == b"":
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def new_token() -> str:

@@ -18,6 +18,7 @@ from typing import Optional
 from cla.session import (
     CONTROL_COMMANDS,
     CONTROL_TIMEOUT_SECONDS,
+    playback_launch_lock,
     read_session,
     send_command,
 )
@@ -436,14 +437,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _error(probe.error)
         if probe.duration is None:
             return _error("could not determine audio duration")
-        shutdown_error = _stop_existing_session()
-        if shutdown_error is not None:
-            return _error(shutdown_error)
         try:
-            manifest = _write_manifest([audio_file], ffprobe, ffplay)
+            with playback_launch_lock():
+                shutdown_error = _stop_existing_session()
+                if shutdown_error is not None:
+                    return _error(shutdown_error)
+                manifest = _write_manifest([audio_file], ffprobe, ffplay)
+                worker_error = _start_worker(manifest)
         except (OSError, TypeError) as error:
-            return _error(f"could not prepare playback: {error}")
-        worker_error = _start_worker(manifest)
+            return _error(f"could not coordinate playback launch: {error}")
         if worker_error is not None:
             manifest.unlink(missing_ok=True)
             return _error(worker_error)
@@ -457,14 +459,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if tool_error is not None:
             return _error(tool_error)
         assert ffprobe is not None and ffplay is not None
-        shutdown_error = _stop_existing_session()
-        if shutdown_error is not None:
-            return _error(shutdown_error)
         try:
-            manifest = _write_manifest(candidates, ffprobe, ffplay)
+            with playback_launch_lock():
+                shutdown_error = _stop_existing_session()
+                if shutdown_error is not None:
+                    return _error(shutdown_error)
+                manifest = _write_manifest(candidates, ffprobe, ffplay)
+                worker_error = _start_worker(manifest)
         except (OSError, TypeError) as error:
-            return _error(f"could not prepare folder playback: {error}")
-        worker_error = _start_worker(manifest)
+            return _error(f"could not coordinate folder playback launch: {error}")
         if worker_error is not None:
             manifest.unlink(missing_ok=True)
             return _error(worker_error)
