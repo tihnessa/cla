@@ -1,4 +1,4 @@
-# clp
+# cla
 
 A simple, cross-platform command-line audio player for Python 3.9 and newer.
 It plays a file or folder in the background and immediately returns control to
@@ -11,7 +11,7 @@ part of the FFmpeg project but may be packaged separately by some operating
 systems. See the [official FFmpeg download page](https://ffmpeg.org/download.html)
 for installation options.
 
-`clp` has no third-party Python runtime dependencies. FFmpeg is a required host
+`cla` has no third-party Python runtime dependencies. FFmpeg is a required host
 application and is not bundled with the project.
 
 ## Usage
@@ -25,14 +25,39 @@ uv tool install .
 Play a local audio file:
 
 ```bash
-clp path/to/audio.mp3
+cla path/to/audio.mp3
 ```
 
 Play the supported audio files directly inside a folder:
 
 ```bash
-clp path/to/album
+cla path/to/album
 ```
+
+Control the active playback session from any terminal:
+
+```bash
+cla pause       # pause; repeated pauses are harmless
+cla play        # resume; repeated plays are harmless
+cla skip        # next track (alias: next)
+cla back        # previous track (alias: prev)
+cla ff          # seek forward 10 seconds
+cla rew         # seek backward 10 seconds
+cla replay      # restart the current track
+cla restart     # restart the playlist from its first track
+```
+
+Starting another file or folder stops and replaces the current session.
+Navigation never wraps or changes the established playlist order. `skip` on
+the final track and `back` on the first track leave playback unchanged and
+print a clear message. Navigation, `replay`, and `restart` start the selected
+track from `00:00`, including when playback was paused.
+
+Seeking while paused keeps playback paused unless `ff` crosses the end of the
+track, in which case the next track starts at `00:00`. `rew` clamps at `00:00`
+instead of selecting the previous track. Fast-forwarding beyond the final
+track stops playback. `restart` and `replay` are equivalent for a single-file
+session. A control issued without an active session reports an error.
 
 Folder playback is non-recursive. It considers regular files with these
 case-insensitive extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.aac`, and
@@ -45,14 +70,15 @@ disc 1. If any playable file lacks a valid track number, the entire folder uses
 case-insensitive natural filename order, so `track2.mp3` precedes
 `track10.mp3`.
 
-The command produces no output when playback starts successfully. It validates
-files with `ffprobe`, launches audio-only `ffplay` in the background, and
-returns immediately. Folder tracks play sequentially. Playback does not need to
-continue after the originating terminal closes.
+The command produces no output when playback or a control succeeds, except for
+first/last-track boundary messages. It validates files with `ffprobe`, launches
+audio-only `ffplay` through a detached coordinator, and returns immediately.
+Folder tracks play sequentially. Playback and later controls do not require the
+originating terminal to remain open.
 
 Supported formats depend on the installed FFmpeg build. Typical builds support
-WAV, MP3, FLAC, OGG/Vorbis, and AAC/M4A. URLs, playlists, and playback controls
-are not supported.
+WAV, MP3, FLAC, OGG/Vorbis, and AAC/M4A. URLs and playlist files are not
+supported.
 
 Errors are written to standard error for missing or unreadable paths, folders
 without matching files, missing FFmpeg tools, invalid or audio-less media,
@@ -72,7 +98,7 @@ uv sync --dev
 Run the command from the development environment:
 
 ```bash
-uv run clp path/to/audio.mp3
+uv run cla path/to/audio.mp3
 ```
 
 Run the checks:

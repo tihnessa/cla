@@ -1,5 +1,5 @@
 [project]
-name = "clp"
+name = "cla"
 version = "0.1.0"
 description = "A simple command-line audio player."
 readme = "README.md"
@@ -10,7 +10,7 @@ requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]
-clp = "clp.cli:main"
+cla = "cla.cli:main"
 
 [dependency-groups]
 dev = [

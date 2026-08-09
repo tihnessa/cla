@@ -2,23 +2,23 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
 
-from clp.cli import (
+from cla.cli import (
     ProbeResult,
     _directory_candidates,
     _start_worker,
     _write_manifest,
     main,
 )
-from clp.worker import Track, _order_tracks, _play_and_wait, worker_main
+from cla.worker import Track, _order_tracks, _play_and_wait, worker_main
 
 
 def _install_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     tools = {"ffplay": "/tools/ffplay", "ffprobe": "/tools/ffprobe"}
-    monkeypatch.setattr("clp.cli.shutil.which", tools.get)
+    monkeypatch.setattr("cla.cli.shutil.which", tools.get)
 
 
 def _manifest(path: Path, files: list[Path]) -> Path:
@@ -95,8 +95,8 @@ def test_folder_request_writes_snapshot_and_starts_worker(
     write_manifest = Mock(return_value=manifest)
     start_worker = Mock(return_value=None)
     _install_tools(monkeypatch)
-    monkeypatch.setattr("clp.cli._write_manifest", write_manifest)
-    monkeypatch.setattr("clp.cli._start_worker", start_worker)
+    monkeypatch.setattr("cla.cli._write_manifest", write_manifest)
+    monkeypatch.setattr("cla.cli._start_worker", start_worker)
 
     assert main([str(tmp_path)]) == 0
     assert capsys.readouterr() == ("", "")
@@ -115,8 +115,8 @@ def test_folder_request_removes_manifest_when_worker_fails(
     manifest = tmp_path / "manifest.json"
     manifest.touch()
     _install_tools(monkeypatch)
-    monkeypatch.setattr("clp.cli._write_manifest", Mock(return_value=manifest))
-    monkeypatch.setattr("clp.cli._start_worker", Mock(return_value="cannot execute"))
+    monkeypatch.setattr("cla.cli._write_manifest", Mock(return_value=manifest))
+    monkeypatch.setattr("cla.cli._start_worker", Mock(return_value="cannot execute"))
 
     assert main([str(tmp_path)]) == 1
     assert not manifest.exists()
@@ -145,7 +145,7 @@ def test_worker_is_started_with_platform_background_options(
 ) -> None:
     manifest = tmp_path / "manifest.json"
     player = Mock()
-    monkeypatch.setattr("clp.cli.subprocess.Popen", player)
+    monkeypatch.setattr("cla.cli.subprocess.Popen", player)
 
     assert _start_worker(manifest) is None
 
@@ -162,7 +162,7 @@ def test_worker_is_started_with_platform_background_options(
     else:
         expected_options["start_new_session"] = True
     player.assert_called_once_with(
-        [os.sys.executable, "-m", "clp.worker", str(manifest)],
+        [os.sys.executable, "-m", "cla.worker", str(manifest)],
         **expected_options,
     )
 
@@ -197,7 +197,7 @@ def test_missing_track_metadata_uses_natural_order_for_every_file() -> None:
     ]
 
 
-def test_worker_warns_and_continues_after_probe_and_playback_failures(
+def test_worker_warns_and_passes_all_playable_tracks_to_controller(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -211,23 +211,20 @@ def test_worker_warns_and_continues_after_probe_and_playback_failures(
     probe = Mock(
         side_effect=[
             ProbeResult(error="invalid data"),
-            ProbeResult(track=None, disc=None),
-            ProbeResult(track=None, disc=None),
+            ProbeResult(track=None, disc=None, duration=20.0),
+            ProbeResult(track=None, disc=None, duration=30.0),
         ]
     )
-    play = Mock(side_effect=["ffplay exited with status 1", None])
-    monkeypatch.setattr("clp.worker._probe_audio", probe)
-    monkeypatch.setattr("clp.worker._play_and_wait", play)
+    serve = Mock(return_value=0)
+    monkeypatch.setattr("cla.worker._probe_audio", probe)
+    monkeypatch.setattr("cla.worker._serve", serve)
 
     assert worker_main([str(manifest)]) == 0
     assert not manifest.exists()
-    assert play.call_args_list == [
-        call("/tools/ffplay", fails),
-        call("/tools/ffplay", good),
-    ]
+    controller = serve.call_args.args[0]
+    assert [track.path for track in controller.tracks] == [fails, good]
     errors = capsys.readouterr().err
     assert str(bad) in errors and "invalid data" in errors
-    assert str(fails) in errors and "status 1" in errors
 
 
 def test_worker_warns_when_no_candidate_is_playable(
@@ -239,7 +236,7 @@ def test_worker_warns_when_no_candidate_is_playable(
     bad.touch()
     manifest = _manifest(tmp_path / "manifest.json", [bad])
     monkeypatch.setattr(
-        "clp.worker._probe_audio", Mock(return_value=ProbeResult(error="invalid"))
+        "cla.worker._probe_audio", Mock(return_value=ProbeResult(error="invalid"))
     )
 
     assert worker_main([str(manifest)]) == 0
@@ -254,7 +251,7 @@ def test_play_and_wait_runs_ffplay_synchronously(
     process = Mock()
     process.wait.return_value = 0
     popen = Mock(return_value=process)
-    monkeypatch.setattr("clp.worker.subprocess.Popen", popen)
+    monkeypatch.setattr("cla.worker.subprocess.Popen", popen)
 
     assert _play_and_wait("/tools/ffplay", audio_file) is None
     process.wait.assert_called_once_with()
