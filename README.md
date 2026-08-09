@@ -173,3 +173,9 @@ Apply automatic lint and formatting fixes with:
 uv run ruff check --fix .
 uv run ruff format .
 ```
+
+## To-do
+
+- [ ] [#19: Extend `cla skip` with absolute and relative track jumps](https://github.com/tihnessa/cla/issues/19)
+- [ ] [#18: Add `cla list` command to display the current playlist](https://github.com/tihnessa/cla/issues/18)
+- [ ] [#17: Add `cla add` command to append tracks to the current playlist](https://github.com/tihnessa/cla/issues/17)
