@@ -4,13 +4,14 @@ import errno
 import getpass
 import hashlib
 import json
+import math
 import os
 import secrets
 import socket
 import stat
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,8 +35,18 @@ COMMAND_ALIASES = {
     "rw": "rw",
     "replay": "replay",
     "restart": "restart",
+    "status": "status",
 }
 CONTROL_COMMANDS = frozenset(COMMAND_ALIASES)
+
+
+@dataclass(frozen=True)
+class PlaybackStatus:
+    """A read-only snapshot of the current track and playback position."""
+
+    title: str
+    elapsed: float
+    duration: float
 
 
 @dataclass(frozen=True)
@@ -44,6 +55,8 @@ class ControlResponse:
 
     ok: bool
     message: Optional[str] = None
+    status: Optional[PlaybackStatus] = None
+    unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -337,7 +350,7 @@ def send_command(command: str) -> ControlResponse:
     descriptor = read_session()
     if descriptor is None:
         clear_session()
-        return ControlResponse(False, "no active playback session")
+        return ControlResponse(False, "no active playback session", unavailable=True)
     request = (
         json.dumps(
             {"token": descriptor.token, "command": command}, separators=(",", ":")
@@ -345,9 +358,23 @@ def send_command(command: str) -> ControlResponse:
         + b"\n"
     )
     try:
-        with socket.create_connection(
+        connection = socket.create_connection(
             ("127.0.0.1", descriptor.port), timeout=CONTROL_TIMEOUT_SECONDS
-        ) as connection:
+        )
+    except ConnectionRefusedError:
+        current = read_session()
+        if current is not None and current.token == descriptor.token:
+            clear_session(descriptor.token)
+        return ControlResponse(False, "no active playback session", unavailable=True)
+    except socket.timeout:
+        return ControlResponse(
+            False, "playback control timed out; session may still be active"
+        )
+    except OSError as error:
+        return ControlResponse(False, f"could not contact playback session: {error}")
+
+    try:
+        with connection:
             connection.settimeout(CONTROL_TIMEOUT_SECONDS)
             connection.sendall(request)
             response_data = json.loads(_receive_line(connection).decode("utf-8"))
@@ -358,23 +385,67 @@ def send_command(command: str) -> ControlResponse:
         message = response_data.get("message")
         if message is not None and not isinstance(message, str):
             raise ValueError("invalid control response")
-        return ControlResponse(response_data["ok"], message)
+        status_data = response_data.get("status")
+        status = None
+        if status_data is not None:
+            if not isinstance(status_data, Mapping):
+                raise ValueError("invalid control response")
+            title = status_data.get("title")
+            elapsed = status_data.get("elapsed")
+            duration = status_data.get("duration")
+            if (
+                not isinstance(title, str)
+                or not title
+                or isinstance(elapsed, bool)
+                or not isinstance(elapsed, (int, float))
+                or isinstance(duration, bool)
+                or not isinstance(duration, (int, float))
+            ):
+                raise ValueError("invalid control response")
+            elapsed_value = float(elapsed)
+            duration_value = float(duration)
+            if (
+                not math.isfinite(elapsed_value)
+                or not math.isfinite(duration_value)
+                or elapsed_value < 0
+                or duration_value <= 0
+                or elapsed_value > duration_value
+            ):
+                raise ValueError("invalid control response")
+            status = PlaybackStatus(title, elapsed_value, duration_value)
+        return ControlResponse(response_data["ok"], message, status=status)
     except socket.timeout:
         return ControlResponse(
             False, "playback control timed out; session may still be active"
         )
-    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+    except OSError as error:
+        return ControlResponse(False, f"playback communication failed: {error}")
+    except (ValueError, UnicodeError, json.JSONDecodeError):
         current = read_session()
         if current is not None and current.token == descriptor.token:
             clear_session(descriptor.token)
-        return ControlResponse(False, "no active playback session")
+        return ControlResponse(False, "invalid control response")
 
 
 def encode_response(response: ControlResponse) -> bytes:
     """Encode one worker response."""
+    status = response.status
     return (
         json.dumps(
-            {"ok": response.ok, "message": response.message}, separators=(",", ":")
+            {
+                "ok": response.ok,
+                "message": response.message,
+                "status": (
+                    {
+                        "title": status.title,
+                        "elapsed": status.elapsed,
+                        "duration": status.duration,
+                    }
+                    if status is not None
+                    else None
+                ),
+            },
+            separators=(",", ":"),
         ).encode("utf-8")
         + b"\n"
     )

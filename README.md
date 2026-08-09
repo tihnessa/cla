@@ -52,7 +52,21 @@ cla rw          # seek backward 10 seconds
 cla replay      # restart the current track
 cla restart     # restart the playlist from its first track
 cla kill        # stop playback and discard the playlist
+cla status      # show the current track and playback position
 ```
+
+`cla status` prints the embedded track title and its elapsed and total time:
+
+```text
+Track title — 01:23 / 03:45
+```
+
+Container title metadata is preferred over audio-stream title metadata. If no
+non-empty title is available, only the file name is shown; parent directories
+and absolute paths are never included. Times use zero-padded minutes and
+seconds, with minutes continuing past 59 for longer tracks. While playback is
+paused, the displayed elapsed time remains frozen. If no playback queue is
+active, `cla status` prints `Nothing in queue` and succeeds.
 
 Starting another file, playlist, or folder stops and replaces the current session.
 Concurrent launch requests are serialized through replacement and startup, so only
@@ -66,11 +80,12 @@ Seeking while paused keeps playback paused unless `ff` crosses the end of the
 track, in which case the next track starts at `00:00`. `rw` clamps at `00:00`
 instead of selecting the previous track. Fast-forwarding beyond the final
 track stops playback. `restart` and `replay` are equivalent for a single-file
-session. A control issued without an active session reports an error.
+session. A control issued without an active session reports an error, except
+for `status`, which reports an empty queue as described above.
 
 Bare control names are reserved: `pause`, `play`, `skip`, `next`, `back`,
-`prev`, `ff`, `rw`, `replay`, `restart`, and `kill` always control the active
-session.
+`prev`, `ff`, `rw`, `replay`, `restart`, `kill`, and `status` always address
+the active playback session.
 To play a file or directory with one of those names, qualify it as a path, such
 as `./next`, `../next`, `album/next`, or an absolute path.
 
@@ -100,12 +115,12 @@ warning, as are missing, unreadable, invalid, audio-less, or otherwise unplayabl
 entries. If no playable entries remain, `cla` reports an error and does not
 publish a new playback session.
 
-The command produces no output when playback or a control succeeds, except for
-first/last-track boundary messages. It validates files with `ffprobe`, launches
-audio-only `ffplay` through a detached coordinator, and returns after playback
-has started and its control session is ready. Folder tracks play sequentially.
-Playback and later controls do not require the originating terminal to remain
-open.
+The command produces no output when playback or a mutating control succeeds,
+except for first/last-track boundary messages. The `status` query produces the
+output described above. `cla` validates files with `ffprobe`, launches audio-only
+`ffplay` through a detached coordinator, and returns after playback has started
+and its control session is ready. Folder tracks play sequentially. Playback and
+later controls do not require the originating terminal to remain open.
 
 Supported formats depend on the installed FFmpeg build. Typical builds support
 WAV, MP3, FLAC, OGG/Vorbis, and AAC/M4A. URLs are not supported.

@@ -20,6 +20,7 @@ from cla.session import (
     COMMAND_ALIASES,
     MAX_MESSAGE_BYTES,
     ControlResponse,
+    PlaybackStatus,
     clear_session,
     encode_response,
     new_token,
@@ -41,6 +42,7 @@ class Track:
     track: Optional[int]
     disc: Optional[int]
     duration: float = math.inf
+    title: Optional[str] = None
 
 
 def _warning(path: Optional[Path], message: str) -> None:
@@ -183,6 +185,15 @@ class PlaybackController:
         canonical = COMMAND_ALIASES.get(command)
         if canonical is None:
             return ControlResponse(False, "unknown playback command")
+        if canonical == "status":
+            return ControlResponse(
+                True,
+                status=PlaybackStatus(
+                    self.current.title or self.current.path.name,
+                    elapsed=self._position(),
+                    duration=self.current.duration,
+                ),
+            )
         if canonical == "kill":
             self.shutdown()
             return ControlResponse(True)
@@ -431,6 +442,7 @@ def worker_main(argv: Optional[Sequence[str]] = None) -> int:
                 track=result.track,
                 disc=result.disc,
                 duration=result.duration,
+                title=result.title,
             )
         )
 

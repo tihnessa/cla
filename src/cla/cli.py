@@ -43,6 +43,7 @@ class ProbeResult:
     track: Optional[int] = None
     disc: Optional[int] = None
     duration: Optional[float] = None
+    title: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -59,7 +60,8 @@ def _parser() -> argparse.ArgumentParser:
         prog="cla",
         description="Play local audio in the background or control active playback.",
         epilog=(
-            "controls: pause, play, skip/next, back/prev, ff, rw, replay, restart, kill"
+            "controls: pause, play, skip/next, back/prev, ff, rw, replay, "
+            "restart, kill, status"
         ),
     )
     parser.add_argument(
@@ -256,6 +258,19 @@ def _metadata_number(tags: object, name: str) -> Optional[int]:
     return number if number > 0 else None
 
 
+def _metadata_text(tags: object, name: str) -> Optional[str]:
+    if not isinstance(tags, Mapping):
+        return None
+    value = next(
+        (value for key, value in tags.items() if str(key).casefold() == name),
+        None,
+    )
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
 def _probe_audio(ffprobe: str, audio_file: Path) -> ProbeResult:
     try:
         result = subprocess.run(
@@ -267,8 +282,8 @@ def _probe_audio(ffprobe: str, audio_file: Path) -> ProbeResult:
                 "a:0",
                 "-show_entries",
                 (
-                    "stream=codec_type,duration:stream_tags=track,disc:"
-                    "format=duration:format_tags=track,disc"
+                    "stream=codec_type,duration:stream_tags=track,disc,title:"
+                    "format=duration:format_tags=track,disc,title"
                 ),
                 "-of",
                 "json",
@@ -320,6 +335,7 @@ def _probe_audio(ffprobe: str, audio_file: Path) -> ProbeResult:
     disc = _metadata_number(format_tags, "disc") or _metadata_number(
         stream_tags, "disc"
     )
+    title = _metadata_text(format_tags, "title") or _metadata_text(stream_tags, "title")
     duration_value = (
         format_data.get("duration") if isinstance(format_data, Mapping) else None
     )
@@ -331,7 +347,7 @@ def _probe_audio(ffprobe: str, audio_file: Path) -> ProbeResult:
         duration = None
     if duration is not None and (not math.isfinite(duration) or duration <= 0):
         duration = None
-    return ProbeResult(track=track, disc=disc, duration=duration)
+    return ProbeResult(track=track, disc=disc, duration=duration, title=title)
 
 
 def _player_command(ffplay: str, audio_file: Path, start_at: float = 0.0) -> list[str]:
@@ -612,6 +628,11 @@ def _send_control(command: str) -> ControlResponse:
     return response if error is None else ControlResponse(False, error)
 
 
+def _format_time(seconds: float) -> str:
+    minutes, remaining_seconds = divmod(int(max(0.0, seconds)), 60)
+    return f"{minutes:02d}:{remaining_seconds:02d}"
+
+
 def _tools() -> tuple[Optional[str], Optional[str], Optional[str]]:
     ffprobe = _find_tool("ffprobe")
     if ffprobe is None:
@@ -641,6 +662,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     argument = _parser().parse_args(argv).target
     if argument in CONTROL_COMMANDS:
         response = _send_control(argument)
+        if argument == "status":
+            if response.unavailable:
+                print("Nothing in queue")
+                return 0
+            if not response.ok:
+                return _error(response.message or "playback status failed")
+            if response.status is None:
+                return _error("invalid control response")
+            status = response.status
+            print(
+                f"{status.title} — {_format_time(status.elapsed)} / "
+                f"{_format_time(status.duration)}"
+            )
+            return 0
         if not response.ok:
             return _error(response.message or "playback control failed")
         if response.message is not None:

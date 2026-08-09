@@ -118,12 +118,14 @@ def test_removed_rew_token_can_address_a_real_file(
     request.assert_not_called()
 
 
-def test_qualified_kill_name_remains_a_filesystem_target(
+@pytest.mark.parametrize("reserved_name", ["kill", "status"])
+def test_qualified_reserved_name_remains_a_filesystem_target(
+    reserved_name: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    (tmp_path / "kill").touch()
+    (tmp_path / reserved_name).touch()
     monkeypatch.chdir(tmp_path)
     request = Mock()
     monkeypatch.setattr("cla.cli.send_command", request)
@@ -131,7 +133,7 @@ def test_qualified_kill_name_remains_a_filesystem_target(
         "cla.cli._tools", Mock(return_value=(None, None, "filesystem target"))
     )
 
-    assert main(["./kill"]) == 1
+    assert main([f"./{reserved_name}"]) == 1
     assert "filesystem target" in capsys.readouterr().err
     request.assert_not_called()
 
@@ -348,8 +350,8 @@ def test_probes_and_starts_playback_in_background(
             "a:0",
             "-show_entries",
             (
-                "stream=codec_type,duration:stream_tags=track,disc:"
-                "format=duration:format_tags=track,disc"
+                "stream=codec_type,duration:stream_tags=track,disc,title:"
+                "format=duration:format_tags=track,disc,title"
             ),
             "-of",
             "json",
@@ -385,8 +387,13 @@ def test_probe_prefers_container_track_metadata(
 ) -> None:
     path = tmp_path / "sample.mp3"
     output = {
-        "streams": [{"codec_type": "audio", "tags": {"track": "8/12", "disc": "2/2"}}],
-        "format": {"tags": {"TRACK": "3/12", "DISC": "1/2"}},
+        "streams": [
+            {
+                "codec_type": "audio",
+                "tags": {"track": "8/12", "disc": "2/2", "title": "Stream"},
+            }
+        ],
+        "format": {"tags": {"TRACK": "3/12", "DISC": "1/2", "TITLE": " Container "}},
     }
     monkeypatch.setattr(
         "cla.cli.subprocess.run",
@@ -397,7 +404,9 @@ def test_probe_prefers_container_track_metadata(
         ),
     )
 
-    assert _probe_audio("/tools/ffprobe", path) == ProbeResult(track=3, disc=1)
+    assert _probe_audio("/tools/ffprobe", path) == ProbeResult(
+        track=3, disc=1, title="Container"
+    )
 
 
 def test_probe_falls_back_to_stream_metadata(
@@ -406,8 +415,13 @@ def test_probe_falls_back_to_stream_metadata(
 ) -> None:
     path = tmp_path / "sample.flac"
     output = {
-        "streams": [{"codec_type": "audio", "tags": {"track": "4", "disc": "2"}}],
-        "format": {"tags": {"track": "not-a-number"}},
+        "streams": [
+            {
+                "codec_type": "audio",
+                "tags": {"track": "4", "disc": "2", "TITLE": "Stream title"},
+            }
+        ],
+        "format": {"tags": {"track": "not-a-number", "title": "  "}},
     }
     monkeypatch.setattr(
         "cla.cli.subprocess.run",
@@ -418,7 +432,9 @@ def test_probe_falls_back_to_stream_metadata(
         ),
     )
 
-    assert _probe_audio("/tools/ffprobe", path) == ProbeResult(track=4, disc=2)
+    assert _probe_audio("/tools/ffprobe", path) == ProbeResult(
+        track=4, disc=2, title="Stream title"
+    )
 
 
 def test_probe_rejects_malformed_json(
