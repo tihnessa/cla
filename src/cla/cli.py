@@ -46,9 +46,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cla",
         description="Play local audio in the background or control active playback.",
-        epilog=(
-            "controls: pause, play, skip/next, back/prev, ff, rew, replay, restart"
-        ),
+        epilog=("controls: pause, play, skip/next, back/prev, ff, rw, replay, restart"),
     )
     parser.add_argument(
         "target",

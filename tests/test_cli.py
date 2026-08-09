@@ -35,7 +35,10 @@ def test_help_exits_successfully(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
 
     assert error.value.code == 0
-    assert "path" in capsys.readouterr().out
+    help_text = capsys.readouterr().out
+    assert "path" in help_text
+    assert "rw" in help_text
+    assert "rew" not in help_text
 
 
 def test_audio_file_is_required() -> None:
@@ -53,6 +56,66 @@ def test_rejects_missing_path(
 
     assert main([str(path)]) == 1
     assert "not a readable file or directory" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "path_kind", ["current-relative", "parent-relative", "nested", "absolute"]
+)
+def test_explicit_command_named_paths_are_filesystem_targets(
+    path_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    if path_kind == "current-relative":
+        target = tmp_path / "next"
+        argument = "./next"
+        working_directory = tmp_path
+    elif path_kind == "parent-relative":
+        target = tmp_path / "next"
+        argument = "../next"
+        working_directory = tmp_path / "child"
+        working_directory.mkdir()
+    elif path_kind == "nested":
+        target = tmp_path / "album" / "next"
+        target.mkdir(parents=True)
+        (target / "track.mp3").touch()
+        argument = "album/next"
+        working_directory = tmp_path
+    else:
+        target = tmp_path / "next"
+        argument = str(target)
+        working_directory = tmp_path
+    if path_kind != "nested":
+        target.touch()
+    monkeypatch.chdir(working_directory)
+    request = Mock()
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr(
+        "cla.cli._tools", Mock(return_value=(None, None, "filesystem target"))
+    )
+
+    assert main([argument]) == 1
+    assert "filesystem target" in capsys.readouterr().err
+    request.assert_not_called()
+
+
+def test_removed_rew_token_can_address_a_real_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "rew").touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock()
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr(
+        "cla.cli._tools", Mock(return_value=(None, None, "filesystem target"))
+    )
+
+    assert main(["rew"]) == 1
+    assert "filesystem target" in capsys.readouterr().err
+    request.assert_not_called()
 
 
 def test_rejects_path_when_status_cannot_be_read(

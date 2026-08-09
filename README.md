@@ -42,7 +42,7 @@ cla play        # resume; repeated plays are harmless
 cla skip        # next track (alias: next)
 cla back        # previous track (alias: prev)
 cla ff          # seek forward 10 seconds
-cla rew         # seek backward 10 seconds
+cla rw          # seek backward 10 seconds
 cla replay      # restart the current track
 cla restart     # restart the playlist from its first track
 ```
@@ -56,10 +56,15 @@ print a clear message. Navigation, `replay`, and `restart` start the selected
 track from `00:00`, including when playback was paused.
 
 Seeking while paused keeps playback paused unless `ff` crosses the end of the
-track, in which case the next track starts at `00:00`. `rew` clamps at `00:00`
+track, in which case the next track starts at `00:00`. `rw` clamps at `00:00`
 instead of selecting the previous track. Fast-forwarding beyond the final
 track stops playback. `restart` and `replay` are equivalent for a single-file
 session. A control issued without an active session reports an error.
+
+Bare control names are reserved: `pause`, `play`, `skip`, `next`, `back`,
+`prev`, `ff`, `rw`, `replay`, and `restart` always control the active session.
+To play a file or directory with one of those names, qualify it as a path, such
+as `./next`, `../next`, `album/next`, or an absolute path.
 
 Folder playback is non-recursive. It considers regular files with these
 case-insensitive extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.aac`, and
