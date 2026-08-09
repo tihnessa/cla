@@ -46,16 +46,40 @@ def test_default_session_state_uses_a_private_runtime_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("CLA_SESSION_FILE")
-    monkeypatch.setattr("cla.session.tempfile.gettempdir", lambda: str(tmp_path))
+    runtime_root = tmp_path / "user-runtime"
+    runtime_root.mkdir(mode=0o700)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_root))
 
     session_path = _session_path()
 
     assert session_path.name == "session.json"
-    assert session_path.parent.parent == tmp_path
+    assert session_path.parent.parent == runtime_root
     metadata = session_path.parent.stat()
     assert stat.S_ISDIR(metadata.st_mode)
     assert metadata.st_uid == os.getuid()
     assert stat.S_IMODE(metadata.st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX runtime namespace regression")
+def test_default_session_state_falls_back_beneath_the_user_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLA_SESSION_FILE")
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    shared_temporary = tmp_path / "shared"
+    shared_temporary.mkdir(mode=0o777)
+    home = tmp_path / "home"
+    home.mkdir(mode=0o755)
+    monkeypatch.setattr(
+        "cla.session.tempfile.gettempdir", lambda: str(shared_temporary)
+    )
+    monkeypatch.setattr("cla.session.Path.home", lambda: home)
+
+    session_path = _session_path()
+
+    assert session_path == home / ".cla" / "run" / "session.json"
+    assert shared_temporary not in session_path.parents
+    assert stat.S_IMODE(session_path.parent.stat().st_mode) == 0o700
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink regression")

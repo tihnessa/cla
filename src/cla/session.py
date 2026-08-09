@@ -58,11 +58,56 @@ def _session_path() -> Path:
     override = os.environ.get("CLA_SESSION_FILE")
     if override:
         return Path(override)
-    identity = f"{getpass.getuser()}:{Path.home()}".encode()
-    suffix = hashlib.sha256(identity).hexdigest()[:16]
-    runtime_directory = Path(tempfile.gettempdir()) / f"cla-{suffix}"
-    _ensure_private_directory(runtime_directory)
+    runtime_directory = _default_runtime_directory()
     return runtime_directory / "session.json"
+
+
+def _default_runtime_directory() -> Path:
+    """Return state storage beneath a namespace other users cannot reserve."""
+    if os.name == "nt":
+        identity = f"{getpass.getuser()}:{Path.home()}".encode()
+        suffix = hashlib.sha256(identity).hexdigest()[:16]
+        runtime_directory = Path(tempfile.gettempdir()) / f"cla-{suffix}"
+        _ensure_private_directory(runtime_directory)
+        return runtime_directory
+
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg_runtime:
+        root = Path(xdg_runtime)
+        try:
+            _validate_user_owned_root(root, private=True)
+        except OSError:
+            pass
+        else:
+            runtime_directory = root / "cla"
+            _ensure_private_directory(runtime_directory)
+            return runtime_directory
+
+    home = Path.home()
+    _validate_user_owned_root(home, private=False)
+    application_directory = home / ".cla"
+    _ensure_private_directory(application_directory)
+    runtime_directory = application_directory / "run"
+    _ensure_private_directory(runtime_directory)
+    return runtime_directory
+
+
+def _validate_user_owned_root(path: Path, *, private: bool) -> None:
+    """Validate an existing root before creating predictable state beneath it."""
+    metadata = path.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise OSError(f"playback runtime root is not a directory: {path}")
+    if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
+        raise PermissionError(
+            f"playback runtime root is not owned by this user: {path}"
+        )
+    mode = stat.S_IMODE(metadata.st_mode)
+    if private and mode != 0o700:
+        raise PermissionError(f"playback runtime root does not have mode 0700: {path}")
+    if not private and mode & 0o022:
+        raise PermissionError(
+            f"playback runtime root is writable by another user: {path}"
+        )
 
 
 def _ensure_private_directory(path: Path) -> None:

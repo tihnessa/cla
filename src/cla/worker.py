@@ -372,6 +372,8 @@ def _serve(
                         if command == "_shutdown":
                             controller.shutdown()
                             response = ControlResponse(True)
+                        elif command == "_ping":
+                            response = ControlResponse(True)
                         elif command is None:
                             response = ControlResponse(False, "invalid control request")
                         else:

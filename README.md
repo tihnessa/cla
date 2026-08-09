@@ -94,6 +94,10 @@ If a control takes too long, the command reports a timeout but preserves the
 session because the playback worker may still be completing the operation. A
 later control can be issued normally.
 
+On Unix, control-session state is kept beneath a validated per-user runtime
+directory (`$XDG_RUNTIME_DIR/cla` when available, otherwise `~/.cla/run`) with
+permissions that prevent another local user from replacing its lock files.
+
 ## Development
 
 Install the project and its development dependencies:

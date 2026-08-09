@@ -168,8 +168,11 @@ def test_worker_is_started_with_platform_background_options(
 
     player = Mock(side_effect=popen)
     monkeypatch.setattr("cla.cli.subprocess.Popen", player)
+    session_is_ready = Mock(return_value=True)
+    monkeypatch.setattr("cla.cli._session_is_ready", session_is_ready)
 
     assert _start_worker(manifest) is None
+    session_is_ready.assert_called_once_with(1234)
 
     expected_options = {
         "close_fds": True,
@@ -286,6 +289,38 @@ def test_start_worker_rejects_success_from_worker_that_already_exited(
     assert _start_worker(manifest) == (
         "playback worker exited with status 1 during startup"
     )
+    assert not manifest.exists()
+
+
+def test_start_worker_rejects_success_without_a_reachable_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+    process = Process()
+
+    def popen(command, **options):
+        Path(command[-1]).write_text(
+            json.dumps({"pid": 4321, "ok": True, "error": None}),
+            encoding="utf-8",
+        )
+        return process
+
+    stop_worker = Mock()
+    monkeypatch.setattr("cla.cli.subprocess.Popen", popen)
+    monkeypatch.setattr("cla.cli._session_is_ready", Mock(return_value=False))
+    monkeypatch.setattr("cla.cli._stop_worker", stop_worker)
+
+    assert _start_worker(manifest) == (
+        "playback worker did not publish a reachable session"
+    )
+    stop_worker.assert_called_once_with(process)
     assert not manifest.exists()
 
 

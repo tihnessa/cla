@@ -308,6 +308,17 @@ def _start_worker(manifest: Path) -> Optional[str]:
                             "playback worker exited with status "
                             f"{returncode} during startup"
                         )
+                    if not _session_is_ready(process.pid):
+                        _stop_worker(process)
+                        manifest.unlink(missing_ok=True)
+                        return "playback worker did not publish a reachable session"
+                    returncode = process.poll()
+                    if returncode is not None:
+                        manifest.unlink(missing_ok=True)
+                        return (
+                            "playback worker exited with status "
+                            f"{returncode} during startup"
+                        )
                     return None
                 _stop_worker(process)
                 manifest.unlink(missing_ok=True)
@@ -336,6 +347,16 @@ def _start_worker(manifest: Path) -> Optional[str]:
             time.sleep(STARTUP_POLL_INTERVAL_SECONDS)
     finally:
         startup_path.unlink(missing_ok=True)
+
+
+def _session_is_ready(expected_pid: int) -> bool:
+    """Confirm the startup descriptor belongs to and reaches the new worker."""
+    descriptor = read_session()
+    if descriptor is None or descriptor.pid != expected_pid:
+        return False
+    response = send_command("_ping")
+    current = read_session()
+    return response.ok and current == descriptor
 
 
 def _read_startup_status(

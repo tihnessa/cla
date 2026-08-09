@@ -10,6 +10,7 @@ from cla.cli import (
     FFMPEG_DOWNLOAD_URL,
     ProbeResult,
     _probe_audio,
+    _session_is_ready,
     _stop_existing_session,
     main,
 )
@@ -131,6 +132,33 @@ def test_rejects_media_without_an_audio_stream(
     assert "does not contain an audio stream" in capsys.readouterr().err
 
 
+def test_startup_readiness_requires_the_owned_session_to_remain_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = SessionDescriptor(43210, "secret", 1234)
+    read_session = Mock(side_effect=[descriptor, None])
+    ping = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli.read_session", read_session)
+    monkeypatch.setattr("cla.cli.send_command", ping)
+
+    assert not _session_is_ready(1234)
+    ping.assert_called_once_with("_ping")
+
+
+def test_startup_readiness_rejects_another_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "cla.cli.read_session",
+        Mock(return_value=SessionDescriptor(43210, "secret", 9999)),
+    )
+    ping = Mock()
+    monkeypatch.setattr("cla.cli.send_command", ping)
+
+    assert not _session_is_ready(1234)
+    ping.assert_not_called()
+
+
 def test_reports_ffprobe_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -224,6 +252,7 @@ def test_probes_and_starts_playback_in_background(
     player = Mock(side_effect=popen)
     monkeypatch.setattr("cla.cli.subprocess.run", probe)
     monkeypatch.setattr("cla.cli.subprocess.Popen", player)
+    monkeypatch.setattr("cla.cli._session_is_ready", Mock(return_value=True))
 
     assert main([str(path)]) == 0
     assert capsys.readouterr() == ("", "")
