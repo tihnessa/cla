@@ -12,9 +12,11 @@ import pytest
 
 from cla.session import (
     ControlResponse,
+    PlaybackStatus,
     _acquire_windows_lock,
     _session_path,
     clear_session,
+    encode_response,
     playback_launch_lock,
     publish_session,
     read_session,
@@ -275,7 +277,53 @@ def test_stale_session_is_removed_when_connection_fails(
 
     assert not response.ok
     assert response.message == "no active playback session"
+    assert response.unavailable
     assert not session_file.exists()
+
+
+def test_status_response_round_trip(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_session(43210, "secret")
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.recv.return_value = encode_response(
+        ControlResponse(
+            True,
+            status=PlaybackStatus("Song", elapsed=12.5, duration=90.0),
+        )
+    )
+    monkeypatch.setattr(
+        "cla.session.socket.create_connection", Mock(return_value=connection)
+    )
+
+    assert send_command("status") == ControlResponse(
+        True,
+        status=PlaybackStatus("Song", elapsed=12.5, duration=90.0),
+    )
+
+
+def test_malformed_status_response_is_a_protocol_error(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_session(43210, "secret")
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.recv.return_value = (
+        b'{"ok":true,"message":null,"status":'
+        b'{"title":"Song","elapsed":"soon","duration":90}}\n'
+    )
+    monkeypatch.setattr(
+        "cla.session.socket.create_connection", Mock(return_value=connection)
+    )
+
+    response = send_command("status")
+
+    assert not response.ok
+    assert response.message == "invalid control response"
+    assert not response.unavailable
 
 
 def test_response_timeout_preserves_a_live_session(

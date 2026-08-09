@@ -5,7 +5,12 @@ from unittest.mock import Mock
 import pytest
 
 from cla.cli import main
-from cla.session import CONTROL_COMMANDS, ControlResponse, SessionDescriptor
+from cla.session import (
+    CONTROL_COMMANDS,
+    ControlResponse,
+    PlaybackStatus,
+    SessionDescriptor,
+)
 from cla.worker import PlaybackController, Track
 
 EXPECTED_CONTROL_COMMANDS = {
@@ -20,6 +25,7 @@ EXPECTED_CONTROL_COMMANDS = {
     "rw",
     "replay",
     "restart",
+    "status",
 }
 
 
@@ -54,7 +60,13 @@ def controller():
 
     tracks = [
         Track(Path("track2.mp3"), track=2, disc=1, duration=30.0),
-        Track(Path("track1.mp3"), track=1, disc=1, duration=20.0),
+        Track(
+            Path("track1.mp3"),
+            track=1,
+            disc=1,
+            duration=20.0,
+            title="First track",
+        ),
     ]
     player = PlaybackController(
         "/tools/ffplay",
@@ -101,6 +113,42 @@ def test_pause_and_play_are_distinct_silent_idempotent_operations(controller) ->
     count = len(processes)
     assert player.handle("play").ok
     assert len(processes) == count
+
+
+def test_status_is_read_only_and_uses_authoritative_position(controller) -> None:
+    player, now, processes = controller
+    now[0] += 7.9
+
+    response = player.handle("status")
+
+    assert response.ok
+    assert response.status is not None
+    assert response.status.title == "First track"
+    assert response.status.elapsed == pytest.approx(7.9)
+    assert response.status.duration == 20.0
+    assert player.index == 0
+    assert player.offset == 0
+    assert not player.paused
+    assert len(processes) == 1
+
+    player.handle("pause")
+    paused = player.handle("status")
+    now[0] += 50
+
+    assert player.handle("status") == paused
+    assert paused.status is not None
+    assert paused.status.elapsed == pytest.approx(7.9)
+
+
+def test_status_falls_back_to_filename_and_clamps_elapsed(controller) -> None:
+    player, now, _ = controller
+    player.tracks[1] = Track(Path("private/track2.mp3"), track=2, disc=1, duration=30.0)
+    player.handle("next")
+    now[0] += 40
+
+    response = player.handle("status")
+
+    assert response.status == PlaybackStatus("track2.mp3", elapsed=30.0, duration=30.0)
 
 
 def test_rewind_clamps_and_preserves_paused_state(controller) -> None:
@@ -244,7 +292,15 @@ def test_bare_control_command_wins_over_a_colliding_file(
 ) -> None:
     (tmp_path / command).touch()
     monkeypatch.chdir(tmp_path)
-    request = Mock(return_value=ControlResponse(True))
+    response = (
+        ControlResponse(
+            True,
+            status=PlaybackStatus("Song", elapsed=0.0, duration=1.0),
+        )
+        if command == "status"
+        else ControlResponse(True)
+    )
+    request = Mock(return_value=response)
     monkeypatch.setattr("cla.cli.send_command", request)
 
     assert main([command]) == 0
@@ -279,6 +335,39 @@ def test_cli_prints_boundary_and_reports_missing_session(
     )
     assert main(["pause"]) == 1
     assert "no active playback session" in capsys.readouterr().err
+
+
+def test_cli_prints_status_and_treats_an_empty_queue_as_success(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    request = Mock(
+        return_value=ControlResponse(
+            True,
+            status=PlaybackStatus("A title", elapsed=83.9, duration=4504.8),
+        )
+    )
+    monkeypatch.setattr("cla.cli.send_command", request)
+
+    assert main(["status"]) == 0
+    assert capsys.readouterr() == ("A title — 01:23 / 75:04\n", "")
+
+    request.return_value = ControlResponse(
+        False, "no active playback session", unavailable=True
+    )
+    assert main(["status"]) == 0
+    assert capsys.readouterr() == ("Nothing in queue\n", "")
+
+
+def test_cli_status_preserves_genuine_errors(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "cla.cli.send_command",
+        Mock(return_value=ControlResponse(False, "invalid control response")),
+    )
+
+    assert main(["status"]) == 1
+    assert "invalid control response" in capsys.readouterr().err
 
 
 def test_cli_kill_waits_for_session_cleanup_and_succeeds_silently(

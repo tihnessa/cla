@@ -370,7 +370,7 @@ def test_worker_warns_and_passes_all_playable_tracks_to_controller(
         side_effect=[
             ProbeResult(error="invalid data"),
             ProbeResult(track=None, disc=None, duration=20.0),
-            ProbeResult(track=None, disc=None, duration=30.0),
+            ProbeResult(track=None, disc=None, duration=30.0, title="Good title"),
         ]
     )
     serve = Mock(return_value=0)
@@ -382,6 +382,7 @@ def test_worker_warns_and_passes_all_playable_tracks_to_controller(
     assert not manifest.exists()
     controller = serve.call_args.args[0]
     assert [track.path for track in controller.tracks] == [fails, good]
+    assert [track.title for track in controller.tracks] == [None, "Good title"]
     assert serve.call_args.args[1] == startup_status
     errors = capsys.readouterr().err
     assert str(bad) in errors and "invalid data" in errors
