@@ -231,9 +231,9 @@ def test_windows_launch_lock_surfaces_non_contention_errors(
 def test_waiting_launch_does_not_read_the_locked_region(
     session_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original_open = Path.open
+    original_fdopen = os.fdopen
 
-    class UnreadableLockFile:
+    class InaccessibleLockRegion:
         def __init__(self, lock_file):
             self.lock_file = lock_file
 
@@ -250,10 +250,13 @@ def test_waiting_launch_does_not_read_the_locked_region(
         def read(self, *args, **kwargs):
             raise PermissionError("locked byte cannot be read")
 
-    def unreadable_open(path, *args, **kwargs):
-        return UnreadableLockFile(original_open(path, *args, **kwargs))
+        def write(self, *args, **kwargs):
+            raise PermissionError("locked byte cannot be written")
 
-    monkeypatch.setattr(Path, "open", unreadable_open)
+    def inaccessible_fdopen(*args, **kwargs):
+        return InaccessibleLockRegion(original_fdopen(*args, **kwargs))
+
+    monkeypatch.setattr("cla.session.os.fdopen", inaccessible_fdopen)
 
     with playback_launch_lock():
         pass

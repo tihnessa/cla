@@ -200,13 +200,8 @@ def playback_launch_lock() -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            # Reading byte zero before acquiring the lock fails with
-            # PermissionError when another Windows process owns that region.
-            # Inspect file metadata instead; only an uninitialized lock file
-            # needs a byte appended before any process can lock it.
-            if os.fstat(lock_file.fileno()).st_size == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
+            # Windows permits locking a range beyond end-of-file. Do not read
+            # or initialize byte zero: another launcher may already own it.
             lock_file.seek(0)
             _acquire_windows_lock(lock_file, msvcrt)
         else:
@@ -231,9 +226,6 @@ def _session_descriptor_lock() -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            if os.fstat(lock_file.fileno()).st_size == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
             lock_file.seek(0)
             _acquire_windows_lock(lock_file, msvcrt)
         else:
