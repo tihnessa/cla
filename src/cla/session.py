@@ -1,5 +1,6 @@
 """Local control protocol for the detached playback worker."""
 
+import errno
 import getpass
 import hashlib
 import json
@@ -7,6 +8,7 @@ import os
 import secrets
 import socket
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ MAX_MESSAGE_BYTES = 4096
 # A controller operation may spend two seconds waiting for FFplay to terminate,
 # then another two seconds waiting after a forced kill.
 CONTROL_TIMEOUT_SECONDS = 5.0
+WINDOWS_LOCK_RETRY_SECONDS = 0.05
 COMMAND_ALIASES = {
     "skip": "next",
     "next": "next",
@@ -64,6 +67,26 @@ def _launch_lock_path() -> Path:
     return session_path.with_name(f"{session_path.name}.launch.lock")
 
 
+def _acquire_windows_lock(lock_file: object, msvcrt: object) -> None:
+    """Wait until byte zero can be locked, without the CRT's retry limit."""
+    while True:
+        try:
+            msvcrt.locking(  # type: ignore[attr-defined]
+                lock_file.fileno(),
+                msvcrt.LK_NBLCK,
+                1,  # type: ignore[attr-defined]
+            )
+            return
+        except OSError as error:
+            winerror = getattr(error, "winerror", None)
+            if winerror not in (None, 33) or (
+                winerror is None
+                and error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK)
+            ):
+                raise
+            time.sleep(WINDOWS_LOCK_RETRY_SECONDS)
+
+
 @contextmanager
 def playback_launch_lock() -> Iterator[None]:
     """Serialize replacement and startup of the per-user playback worker."""
@@ -84,7 +107,7 @@ def playback_launch_lock() -> Iterator[None]:
                 lock_file.write(b"\0")
                 lock_file.flush()
             lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            _acquire_windows_lock(lock_file, msvcrt)
         else:
             import fcntl
 

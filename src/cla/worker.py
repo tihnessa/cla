@@ -29,6 +29,8 @@ from cla.session import (
 ACCEPT_TIMEOUT_SECONDS = 0.1
 PROCESS_STOP_TIMEOUT_SECONDS = 2.0
 PROCESS_KILL_TIMEOUT_SECONDS = 2.0
+PLAYER_STARTUP_GRACE_SECONDS = 0.1
+PLAYER_STARTUP_POLL_INTERVAL_SECONDS = 0.01
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,22 @@ class PlaybackController:
     def start(self) -> ControlResponse:
         """Start the first track in the established order."""
         return self._launch()
+
+    def confirm_started(self) -> ControlResponse:
+        """Confirm the initial player remains alive through its startup window."""
+        deadline = time.monotonic() + PLAYER_STARTUP_GRACE_SECONDS
+        while True:
+            process = self.process
+            returncode = process.poll() if process is not None else None
+            if returncode is not None:
+                self.process = None
+                self.stopped = True
+                return ControlResponse(
+                    False, f"ffplay exited with status {returncode} during startup"
+                )
+            if time.monotonic() >= deadline:
+                return ControlResponse(True)
+            time.sleep(PLAYER_STARTUP_POLL_INTERVAL_SECONDS)
 
     def tick(self) -> None:
         """Advance after a player exits naturally."""
@@ -314,6 +332,13 @@ def _serve(
             start = controller.start()
             if not start.ok:
                 error = start.message or "could not start playback"
+                _warning(controller.current.path, error)
+                if startup_status is not None:
+                    _publish_startup(startup_status, False, error)
+                return 1
+            start = controller.confirm_started()
+            if not start.ok:
+                error = start.message or "ffplay exited during startup"
                 _warning(controller.current.path, error)
                 if startup_status is not None:
                     _publish_startup(startup_status, False, error)

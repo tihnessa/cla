@@ -254,6 +254,32 @@ def test_start_worker_ignores_status_for_another_pid(
     assert "exited" in error
 
 
+def test_start_worker_rejects_success_from_worker_that_already_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return 1
+
+    def popen(command, **options):
+        Path(command[-1]).write_text(
+            json.dumps({"pid": 4321, "ok": True, "error": None}),
+            encoding="utf-8",
+        )
+        return Process()
+
+    monkeypatch.setattr("cla.cli.subprocess.Popen", popen)
+
+    assert _start_worker(manifest) == (
+        "playback worker exited with status 1 during startup"
+    )
+    assert not manifest.exists()
+
+
 def test_metadata_order_uses_disc_track_and_natural_tiebreaker() -> None:
     tracks = [
         Track(Path("z10.mp3"), track=2, disc=1),

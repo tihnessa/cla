@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import socket
@@ -9,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from cla.session import (
+    _acquire_windows_lock,
     clear_session,
     playback_launch_lock,
     publish_session,
@@ -70,6 +72,54 @@ def test_playback_launch_lock_serializes_concurrent_launches(
     assert not first.is_alive()
     assert not second.is_alive()
     assert second_acquired.is_set()
+
+
+def test_windows_launch_lock_retries_beyond_crt_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "launch.lock"
+    lock_path.write_bytes(b"\0")
+
+    class Msvcrt:
+        LK_NBLCK = 2
+
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def locking(self, fileno: int, mode: int, size: int) -> None:
+            assert fileno >= 0
+            assert mode == self.LK_NBLCK
+            assert size == 1
+            self.attempts += 1
+            if self.attempts <= 12:
+                raise PermissionError(errno.EACCES, "lock is held")
+
+    msvcrt = Msvcrt()
+    sleep = Mock()
+    monkeypatch.setattr("cla.session.time.sleep", sleep)
+
+    with lock_path.open("r+b") as lock_file:
+        _acquire_windows_lock(lock_file, msvcrt)
+
+    assert msvcrt.attempts == 13
+    assert sleep.call_count == 12
+
+
+def test_windows_launch_lock_surfaces_non_contention_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "launch.lock"
+    lock_path.write_bytes(b"\0")
+    msvcrt = Mock(LK_NBLCK=2)
+    msvcrt.locking.side_effect = OSError(errno.EBADF, "invalid handle")
+    sleep = Mock()
+    monkeypatch.setattr("cla.session.time.sleep", sleep)
+
+    with lock_path.open("r+b") as lock_file:
+        with pytest.raises(OSError, match="invalid handle"):
+            _acquire_windows_lock(lock_file, msvcrt)
+
+    sleep.assert_not_called()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows file-locking regression")
@@ -213,6 +263,26 @@ def test_ffplay_start_failure_is_published_to_parent(
     startup = json.loads(startup_status.read_text(encoding="utf-8"))
     assert startup["ok"] is False
     assert "cannot execute" in startup["error"]
+    assert not session_file.exists()
+
+
+def test_immediate_ffplay_exit_is_published_as_startup_failure(
+    session_file: Path, tmp_path: Path
+) -> None:
+    process = Mock()
+    process.poll.return_value = 1
+    controller = PlaybackController(
+        "/tools/ffplay",
+        [Track(Path("song.mp3"), track=1, disc=1, duration=60.0)],
+        popen=Mock(return_value=process),
+    )
+    startup_status = tmp_path / "startup.json"
+
+    assert _serve(controller, startup_status) == 1
+
+    startup = json.loads(startup_status.read_text(encoding="utf-8"))
+    assert startup["ok"] is False
+    assert startup["error"] == "ffplay exited with status 1 during startup"
     assert not session_file.exists()
 
 

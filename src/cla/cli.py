@@ -300,6 +300,13 @@ def _start_worker(manifest: Path) -> Optional[str]:
             if status is not None:
                 ok, error = status
                 if ok:
+                    returncode = process.poll()
+                    if returncode is not None:
+                        manifest.unlink(missing_ok=True)
+                        return (
+                            "playback worker exited with status "
+                            f"{returncode} during startup"
+                        )
                     return None
                 _stop_worker(process)
                 manifest.unlink(missing_ok=True)
@@ -311,7 +318,11 @@ def _start_worker(manifest: Path) -> Optional[str]:
                 if status is not None:
                     ok, error = status
                     if ok:
-                        return None
+                        manifest.unlink(missing_ok=True)
+                        return (
+                            "playback worker exited with status "
+                            f"{returncode} during startup"
+                        )
                     manifest.unlink(missing_ok=True)
                     return error or "playback worker failed to start"
                 manifest.unlink(missing_ok=True)

@@ -1,8 +1,8 @@
 # cla
 
 A simple, cross-platform command-line audio player for Python 3.9 and newer.
-It plays a file or folder in the background and immediately returns control to
-the terminal.
+It plays a file or folder in the background and returns control to the terminal
+once playback has started and its control session is ready.
 
 ## Requirements
 
