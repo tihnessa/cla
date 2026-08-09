@@ -1,4 +1,5 @@
 import json
+import os
 import socket
 import threading
 import time
@@ -69,6 +70,38 @@ def test_playback_launch_lock_serializes_concurrent_launches(
     assert not first.is_alive()
     assert not second.is_alive()
     assert second_acquired.is_set()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-locking regression")
+def test_waiting_launch_does_not_read_the_locked_region(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_open = Path.open
+
+    class UnreadableLockFile:
+        def __init__(self, lock_file):
+            self.lock_file = lock_file
+
+        def __getattr__(self, name):
+            return getattr(self.lock_file, name)
+
+        def __enter__(self):
+            self.lock_file.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.lock_file.__exit__(*args)
+
+        def read(self, *args, **kwargs):
+            raise PermissionError("locked byte cannot be read")
+
+    def unreadable_open(path, *args, **kwargs):
+        return UnreadableLockFile(original_open(path, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "open", unreadable_open)
+
+    with playback_launch_lock():
+        pass
 
 
 def test_stale_session_is_removed_when_connection_fails(

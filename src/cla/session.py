@@ -76,8 +76,11 @@ def playback_launch_lock() -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            lock_file.seek(0)
-            if lock_file.read(1) == b"":
+            # Reading byte zero before acquiring the lock fails with
+            # PermissionError when another Windows process owns that region.
+            # Inspect file metadata instead; only an uninitialized lock file
+            # needs a byte appended before any process can lock it.
+            if os.fstat(lock_file.fileno()).st_size == 0:
                 lock_file.write(b"\0")
                 lock_file.flush()
             lock_file.seek(0)
