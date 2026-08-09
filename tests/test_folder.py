@@ -1,24 +1,30 @@
 import json
 import os
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
 
-from clp.cli import (
+from cla.cli import (
     ProbeResult,
     _directory_candidates,
     _start_worker,
+    _stop_posix_worker_tree,
+    _stop_windows_worker_tree,
+    _stop_worker,
     _write_manifest,
     main,
 )
-from clp.worker import Track, _order_tracks, _play_and_wait, worker_main
+from cla.worker import Track, _order_tracks, _play_and_wait, worker_main
 
 
 def _install_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     tools = {"ffplay": "/tools/ffplay", "ffprobe": "/tools/ffprobe"}
-    monkeypatch.setattr("clp.cli.shutil.which", tools.get)
+    monkeypatch.setattr("cla.cli.shutil.which", tools.get)
 
 
 def _manifest(path: Path, files: list[Path]) -> Path:
@@ -95,8 +101,8 @@ def test_folder_request_writes_snapshot_and_starts_worker(
     write_manifest = Mock(return_value=manifest)
     start_worker = Mock(return_value=None)
     _install_tools(monkeypatch)
-    monkeypatch.setattr("clp.cli._write_manifest", write_manifest)
-    monkeypatch.setattr("clp.cli._start_worker", start_worker)
+    monkeypatch.setattr("cla.cli._write_manifest", write_manifest)
+    monkeypatch.setattr("cla.cli._start_worker", start_worker)
 
     assert main([str(tmp_path)]) == 0
     assert capsys.readouterr() == ("", "")
@@ -115,8 +121,8 @@ def test_folder_request_removes_manifest_when_worker_fails(
     manifest = tmp_path / "manifest.json"
     manifest.touch()
     _install_tools(monkeypatch)
-    monkeypatch.setattr("clp.cli._write_manifest", Mock(return_value=manifest))
-    monkeypatch.setattr("clp.cli._start_worker", Mock(return_value="cannot execute"))
+    monkeypatch.setattr("cla.cli._write_manifest", Mock(return_value=manifest))
+    monkeypatch.setattr("cla.cli._start_worker", Mock(return_value="cannot execute"))
 
     assert main([str(tmp_path)]) == 1
     assert not manifest.exists()
@@ -144,10 +150,29 @@ def test_worker_is_started_with_platform_background_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest = tmp_path / "manifest.json"
-    player = Mock()
-    monkeypatch.setattr("clp.cli.subprocess.Popen", player)
+    _manifest(manifest, [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    def popen(command, **options):
+        status = Path(command[-1])
+        status.write_text(
+            json.dumps({"pid": 1234, "ok": True, "error": None}),
+            encoding="utf-8",
+        )
+        return Process()
+
+    player = Mock(side_effect=popen)
+    monkeypatch.setattr("cla.cli.subprocess.Popen", player)
+    session_is_ready = Mock(return_value=True)
+    monkeypatch.setattr("cla.cli._session_is_ready", session_is_ready)
 
     assert _start_worker(manifest) is None
+    session_is_ready.assert_called_once_with(1234)
 
     expected_options = {
         "close_fds": True,
@@ -162,9 +187,141 @@ def test_worker_is_started_with_platform_background_options(
     else:
         expected_options["start_new_session"] = True
     player.assert_called_once_with(
-        [os.sys.executable, "-m", "clp.worker", str(manifest)],
+        [
+            os.sys.executable,
+            "-m",
+            "cla.worker",
+            str(manifest),
+            player.call_args.args[0][-1],
+        ],
         **expected_options,
     )
+
+
+def test_start_worker_reports_worker_startup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 4321
+
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return -15
+
+        def kill(self):
+            raise AssertionError("terminate should be sufficient")
+
+    process = Process()
+    stop_worker = Mock(side_effect=lambda child: child.terminate())
+
+    def popen(command, **options):
+        Path(command[-1]).write_text(
+            json.dumps({"pid": 4321, "ok": False, "error": "invalid manifest"}),
+            encoding="utf-8",
+        )
+        return process
+
+    monkeypatch.setattr("cla.cli.subprocess.Popen", popen)
+    monkeypatch.setattr("cla.cli._stop_worker", stop_worker)
+
+    assert _start_worker(manifest) == "invalid manifest"
+    stop_worker.assert_called_once_with(process)
+    assert process.terminated
+    assert not manifest.exists()
+
+
+def test_start_worker_ignores_status_for_another_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return 1
+
+    def popen(command, **options):
+        Path(command[-1]).write_text(
+            json.dumps({"pid": 9999, "ok": True, "error": None}),
+            encoding="utf-8",
+        )
+        return Process()
+
+    monkeypatch.setattr("cla.cli.subprocess.Popen", popen)
+
+    error = _start_worker(manifest)
+
+    assert error is not None
+    assert "exited" in error
+
+
+def test_start_worker_rejects_success_from_worker_that_already_exited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return 1
+
+    def popen(command, **options):
+        Path(command[-1]).write_text(
+            json.dumps({"pid": 4321, "ok": True, "error": None}),
+            encoding="utf-8",
+        )
+        return Process()
+
+    monkeypatch.setattr("cla.cli.subprocess.Popen", popen)
+
+    assert _start_worker(manifest) == (
+        "playback worker exited with status 1 during startup"
+    )
+    assert not manifest.exists()
+
+
+def test_start_worker_rejects_success_without_a_reachable_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+    process = Process()
+
+    def popen(command, **options):
+        Path(command[-1]).write_text(
+            json.dumps({"pid": 4321, "ok": True, "error": None}),
+            encoding="utf-8",
+        )
+        return process
+
+    stop_worker = Mock()
+    monkeypatch.setattr("cla.cli.subprocess.Popen", popen)
+    monkeypatch.setattr("cla.cli._session_is_ready", Mock(return_value=False))
+    monkeypatch.setattr("cla.cli._stop_worker", stop_worker)
+
+    assert _start_worker(manifest) == (
+        "playback worker did not publish a reachable session"
+    )
+    stop_worker.assert_called_once_with(process)
+    assert not manifest.exists()
 
 
 def test_metadata_order_uses_disc_track_and_natural_tiebreaker() -> None:
@@ -197,7 +354,7 @@ def test_missing_track_metadata_uses_natural_order_for_every_file() -> None:
     ]
 
 
-def test_worker_warns_and_continues_after_probe_and_playback_failures(
+def test_worker_warns_and_passes_all_playable_tracks_to_controller(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -211,23 +368,22 @@ def test_worker_warns_and_continues_after_probe_and_playback_failures(
     probe = Mock(
         side_effect=[
             ProbeResult(error="invalid data"),
-            ProbeResult(track=None, disc=None),
-            ProbeResult(track=None, disc=None),
+            ProbeResult(track=None, disc=None, duration=20.0),
+            ProbeResult(track=None, disc=None, duration=30.0),
         ]
     )
-    play = Mock(side_effect=["ffplay exited with status 1", None])
-    monkeypatch.setattr("clp.worker._probe_audio", probe)
-    monkeypatch.setattr("clp.worker._play_and_wait", play)
+    serve = Mock(return_value=0)
+    monkeypatch.setattr("cla.worker._probe_audio", probe)
+    monkeypatch.setattr("cla.worker._serve", serve)
+    startup_status = tmp_path / "startup.json"
 
-    assert worker_main([str(manifest)]) == 0
+    assert worker_main([str(manifest), str(startup_status)]) == 0
     assert not manifest.exists()
-    assert play.call_args_list == [
-        call("/tools/ffplay", fails),
-        call("/tools/ffplay", good),
-    ]
+    controller = serve.call_args.args[0]
+    assert [track.path for track in controller.tracks] == [fails, good]
+    assert serve.call_args.args[1] == startup_status
     errors = capsys.readouterr().err
     assert str(bad) in errors and "invalid data" in errors
-    assert str(fails) in errors and "status 1" in errors
 
 
 def test_worker_warns_when_no_candidate_is_playable(
@@ -239,11 +395,162 @@ def test_worker_warns_when_no_candidate_is_playable(
     bad.touch()
     manifest = _manifest(tmp_path / "manifest.json", [bad])
     monkeypatch.setattr(
-        "clp.worker._probe_audio", Mock(return_value=ProbeResult(error="invalid"))
+        "cla.worker._probe_audio", Mock(return_value=ProbeResult(error="invalid"))
     )
+    startup_status = tmp_path / "startup.json"
 
-    assert worker_main([str(manifest)]) == 0
+    assert worker_main([str(manifest), str(startup_status)]) == 1
     assert "no playable audio files" in capsys.readouterr().err
+    assert json.loads(startup_status.read_text(encoding="utf-8"))["ok"] is False
+
+
+def test_worker_reports_invalid_manifest_to_parent(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("not json", encoding="utf-8")
+    startup_status = tmp_path / "startup.json"
+
+    assert worker_main([str(manifest), str(startup_status)]) == 1
+
+    status = json.loads(startup_status.read_text(encoding="utf-8"))
+    assert status["pid"] == os.getpid()
+    assert status["ok"] is False
+    assert "manifest" in status["error"]
+
+
+def test_start_worker_timeout_terminates_child_and_removes_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 1234
+
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return -15
+
+        def kill(self):
+            raise AssertionError("terminate should be sufficient")
+
+    process = Process()
+    monkeypatch.setattr("cla.cli.subprocess.Popen", Mock(return_value=process))
+    monkeypatch.setattr("cla.cli.time.monotonic", Mock(side_effect=[0.0, 100.0]))
+    stop_worker = Mock(side_effect=lambda child: child.terminate())
+    monkeypatch.setattr("cla.cli._stop_worker", stop_worker)
+
+    assert _start_worker(manifest) == "playback worker timed out during startup"
+    stop_worker.assert_called_once_with(process)
+    assert process.terminated
+    assert not manifest.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
+def test_posix_worker_cleanup_signals_the_entire_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = Mock(pid=4321)
+    process.wait.return_value = -15
+    killpg = Mock()
+    monkeypatch.setattr("cla.cli.os.killpg", killpg)
+
+    _stop_posix_worker_tree(process)
+
+    assert killpg.call_args_list == [
+        ((4321, signal.SIGTERM),),
+        ((4321, signal.SIGKILL),),
+    ]
+    process.terminate.assert_not_called()
+    process.wait.assert_called_once()
+
+
+def test_windows_worker_cleanup_uses_tree_aware_termination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = Mock(pid=4321)
+    taskkill = Mock(return_value=subprocess.CompletedProcess([], 0))
+    monkeypatch.setattr("cla.cli.subprocess.run", taskkill)
+
+    _stop_windows_worker_tree(process)
+
+    taskkill.assert_called_once_with(
+        ["taskkill", "/PID", "4321", "/T", "/F"],
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=2.0,
+    )
+    process.kill.assert_not_called()
+    process.wait.assert_called_once_with(timeout=2.0)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
+def test_worker_cleanup_terminates_a_live_startup_descendant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    terminated = tmp_path / "descendant-terminated"
+    ready = tmp_path / "descendant-ready"
+    child_code = """
+import signal
+import sys
+import time
+from pathlib import Path
+
+def stop(*_args):
+    Path(sys.argv[1]).write_text("terminated", encoding="utf-8")
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+Path(sys.argv[2]).write_text("ready", encoding="utf-8")
+while True:
+    time.sleep(1)
+"""
+    worker_code = """
+import signal
+import subprocess
+import sys
+import time
+
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[1], sys.argv[2], sys.argv[3]],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(1)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", worker_code, child_code, str(terminated), str(ready)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 2
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        monkeypatch.setattr("cla.cli.WORKER_STOP_TIMEOUT_SECONDS", 0.2)
+
+        _stop_worker(process)
+
+        assert process.poll() is not None
+        assert terminated.read_text(encoding="utf-8") == "terminated"
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=2)
 
 
 def test_play_and_wait_runs_ffplay_synchronously(
@@ -254,7 +561,7 @@ def test_play_and_wait_runs_ffplay_synchronously(
     process = Mock()
     process.wait.return_value = 0
     popen = Mock(return_value=process)
-    monkeypatch.setattr("clp.worker.subprocess.Popen", popen)
+    monkeypatch.setattr("cla.worker.subprocess.Popen", popen)
 
     assert _play_and_wait("/tools/ffplay", audio_file) is None
     process.wait.assert_called_once_with()
