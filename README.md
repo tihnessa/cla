@@ -48,7 +48,9 @@ cla play        # resume; repeated plays are harmless
 cla skip        # next track (alias: next)
 cla back        # previous track (alias: prev)
 cla ff          # seek forward 10 seconds
+cla ff20        # seek forward 20 seconds
 cla rw          # seek backward 10 seconds
+cla rw30        # seek backward 30 seconds
 cla replay      # restart the current track
 cla restart     # restart the playlist from its first track
 cla kill        # stop playback and discard the playlist
@@ -79,15 +81,19 @@ track from `00:00`, including when playback was paused.
 Seeking while paused keeps playback paused unless `ff` crosses the end of the
 track, in which case the next track starts at `00:00`. `rw` clamps at `00:00`
 instead of selecting the previous track. Fast-forwarding beyond the final
-track stops playback. `restart` and `replay` are equivalent for a single-file
-session. A control issued without an active session reports an error, except
-for `status`, which reports an empty queue as described above.
+track stops playback. Append a positive whole number of seconds directly to
+`ff` or `rw` to choose the seek distance; without a number, the distance is 10
+seconds. Invalid or zero values, such as `ff0`, `rw-5`, or `ffabc`, are ignored.
+`restart` and `replay` are equivalent for a single-file session. A control
+issued without an active session reports an error, except for `status`, which
+reports an empty queue as described above.
 
 Bare control names are reserved: `pause`, `play`, `skip`, `next`, `back`,
 `prev`, `ff`, `rw`, `replay`, `restart`, `kill`, and `status` always address
-the active playback session.
-To play a file or directory with one of those names, qualify it as a path, such
-as `./next`, `../next`, `album/next`, or an absolute path.
+the active playback session. Unqualified names beginning with `ff` or `rw` are
+also reserved for custom or invalid seek controls. To play a file or directory
+with one of those names, qualify it as a path, such as `./next`, `./ff20`,
+`../next`, `album/next`, or an absolute path.
 
 Folder playback is non-recursive. It considers regular files with these
 case-insensitive extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.aac`, and

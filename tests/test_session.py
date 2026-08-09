@@ -432,6 +432,10 @@ def test_worker_serves_controls_over_loopback_and_cleans_up(
     assert read_session() is not None
     assert send_command("pause").ok
     assert controller.paused
+    paused_offset = controller.offset
+    assert send_command("ff20").ok
+    assert controller.offset == pytest.approx(paused_offset + 20)
+    assert controller.paused
     assert send_command("_shutdown").ok
     worker.join(timeout=2)
 
