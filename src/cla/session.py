@@ -358,9 +358,23 @@ def send_command(command: str) -> ControlResponse:
         + b"\n"
     )
     try:
-        with socket.create_connection(
+        connection = socket.create_connection(
             ("127.0.0.1", descriptor.port), timeout=CONTROL_TIMEOUT_SECONDS
-        ) as connection:
+        )
+    except ConnectionRefusedError:
+        current = read_session()
+        if current is not None and current.token == descriptor.token:
+            clear_session(descriptor.token)
+        return ControlResponse(False, "no active playback session", unavailable=True)
+    except socket.timeout:
+        return ControlResponse(
+            False, "playback control timed out; session may still be active"
+        )
+    except OSError as error:
+        return ControlResponse(False, f"could not contact playback session: {error}")
+
+    try:
+        with connection:
             connection.settimeout(CONTROL_TIMEOUT_SECONDS)
             connection.sendall(request)
             response_data = json.loads(_receive_line(connection).decode("utf-8"))
@@ -404,11 +418,8 @@ def send_command(command: str) -> ControlResponse:
         return ControlResponse(
             False, "playback control timed out; session may still be active"
         )
-    except OSError:
-        current = read_session()
-        if current is not None and current.token == descriptor.token:
-            clear_session(descriptor.token)
-        return ControlResponse(False, "no active playback session", unavailable=True)
+    except OSError as error:
+        return ControlResponse(False, f"playback communication failed: {error}")
     except (ValueError, UnicodeError, json.JSONDecodeError):
         current = read_session()
         if current is not None and current.token == descriptor.token:

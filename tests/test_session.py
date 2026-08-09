@@ -270,7 +270,8 @@ def test_stale_session_is_removed_when_connection_fails(
 ) -> None:
     publish_session(43210, "secret")
     monkeypatch.setattr(
-        "cla.session.socket.create_connection", Mock(side_effect=OSError("refused"))
+        "cla.session.socket.create_connection",
+        Mock(side_effect=ConnectionRefusedError("refused")),
     )
 
     response = send_command("pause")
@@ -279,6 +280,43 @@ def test_stale_session_is_removed_when_connection_fails(
     assert response.message == "no active playback session"
     assert response.unavailable
     assert not session_file.exists()
+
+
+def test_other_connection_failures_are_reported_and_preserve_the_session(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_session(43210, "secret")
+    monkeypatch.setattr(
+        "cla.session.socket.create_connection",
+        Mock(side_effect=OSError("socket unavailable")),
+    )
+
+    response = send_command("status")
+
+    assert not response.ok
+    assert response.message == "could not contact playback session: socket unavailable"
+    assert not response.unavailable
+    assert session_file.exists()
+
+
+def test_transport_failures_are_reported_and_preserve_the_session(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_session(43210, "secret")
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.recv.side_effect = ConnectionResetError("reset")
+    monkeypatch.setattr(
+        "cla.session.socket.create_connection", Mock(return_value=connection)
+    )
+
+    response = send_command("status")
+
+    assert not response.ok
+    assert response.message == "playback communication failed: reset"
+    assert not response.unavailable
+    assert session_file.exists()
 
 
 def test_status_response_round_trip(
