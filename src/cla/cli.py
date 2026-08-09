@@ -9,15 +9,24 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from cla.session import CONTROL_COMMANDS, read_session, send_command
+from cla.session import (
+    CONTROL_COMMANDS,
+    CONTROL_TIMEOUT_SECONDS,
+    read_session,
+    send_command,
+)
 
 FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
 PROBE_TIMEOUT_SECONDS = 10
+STARTUP_GRACE_SECONDS = 5.0
+STARTUP_POLL_INTERVAL_SECONDS = 0.01
+WORKER_STOP_TIMEOUT_SECONDS = 2.0
 AUDIO_EXTENSIONS = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"})
 
 
@@ -255,13 +264,120 @@ def _start_worker(manifest: Path) -> Optional[str]:
     if not sys.executable:
         return "could not determine the Python executable for folder playback"
     try:
-        subprocess.Popen(
-            [sys.executable, "-m", "cla.worker", str(manifest)],
+        with tempfile.NamedTemporaryFile(
+            prefix="cla-startup-", suffix=".json", delete=False
+        ) as startup_file:
+            startup_path = Path(startup_file.name)
+        startup_path.unlink(missing_ok=True)
+    except OSError as error:
+        manifest.unlink(missing_ok=True)
+        return f"could not prepare playback startup handshake: {error}"
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "cla.worker", str(manifest), str(startup_path)],
             **_background_options(),
         )
     except OSError as error:
+        startup_path.unlink(missing_ok=True)
+        manifest.unlink(missing_ok=True)
         return f"could not start folder playback: {error}"
-    return None
+
+    try:
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            files = data.get("files") if isinstance(data, Mapping) else None
+            probe_count = len(files) if isinstance(files, list) and files else 1
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            probe_count = 1
+        deadline = (
+            time.monotonic()
+            + probe_count * PROBE_TIMEOUT_SECONDS
+            + STARTUP_GRACE_SECONDS
+        )
+        while True:
+            status = _read_startup_status(startup_path, process.pid)
+            if status is not None:
+                ok, error = status
+                if ok:
+                    return None
+                _stop_worker(process)
+                manifest.unlink(missing_ok=True)
+                return error or "playback worker failed to start"
+
+            returncode = process.poll()
+            if returncode is not None:
+                status = _read_startup_status(startup_path, process.pid)
+                if status is not None:
+                    ok, error = status
+                    if ok:
+                        return None
+                    manifest.unlink(missing_ok=True)
+                    return error or "playback worker failed to start"
+                manifest.unlink(missing_ok=True)
+                return f"playback worker exited with status {returncode} during startup"
+
+            if time.monotonic() >= deadline:
+                _stop_worker(process)
+                manifest.unlink(missing_ok=True)
+                return "playback worker timed out during startup"
+            time.sleep(STARTUP_POLL_INTERVAL_SECONDS)
+    finally:
+        startup_path.unlink(missing_ok=True)
+
+
+def _read_startup_status(
+    path: Path, expected_pid: int
+) -> Optional[tuple[bool, Optional[str]]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(data, Mapping)
+        or data.get("pid") != expected_pid
+        or not isinstance(data.get("ok"), bool)
+    ):
+        return None
+    error = data.get("error")
+    if error is not None and not isinstance(error, str):
+        return None
+    return data["ok"], error
+
+
+def _stop_worker(process: object) -> None:
+    try:
+        if process.poll() is not None:  # type: ignore[attr-defined]
+            return
+        process.terminate()  # type: ignore[attr-defined]
+        try:
+            process.wait(timeout=WORKER_STOP_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
+        except subprocess.TimeoutExpired:
+            process.kill()  # type: ignore[attr-defined]
+            process.wait(timeout=WORKER_STOP_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _stop_existing_session() -> Optional[str]:
+    descriptor = read_session()
+    if descriptor is None:
+        return None
+    response = send_command("_shutdown")
+    if not response.ok:
+        current = read_session()
+        if current is not None and current.token == descriptor.token:
+            return response.message or "could not stop existing playback session"
+        return None
+
+    deadline = time.monotonic() + CONTROL_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        current = read_session()
+        if current is None:
+            return None
+        if current.token != descriptor.token:
+            return "another playback session became active"
+        time.sleep(STARTUP_POLL_INTERVAL_SECONDS)
+    return "existing playback session did not shut down"
 
 
 def _tools() -> tuple[Optional[str], Optional[str], Optional[str]]:
@@ -320,8 +436,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return _error(probe.error)
         if probe.duration is None:
             return _error("could not determine audio duration")
-        if read_session() is not None:
-            send_command("_shutdown")
+        shutdown_error = _stop_existing_session()
+        if shutdown_error is not None:
+            return _error(shutdown_error)
         try:
             manifest = _write_manifest([audio_file], ffprobe, ffplay)
         except (OSError, TypeError) as error:
@@ -340,8 +457,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if tool_error is not None:
             return _error(tool_error)
         assert ffprobe is not None and ffplay is not None
-        if read_session() is not None:
-            send_command("_shutdown")
+        shutdown_error = _stop_existing_session()
+        if shutdown_error is not None:
+            return _error(shutdown_error)
         try:
             manifest = _write_manifest(candidates, ffprobe, ffplay)
         except (OSError, TypeError) as error:

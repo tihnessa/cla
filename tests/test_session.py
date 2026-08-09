@@ -1,4 +1,5 @@
 import json
+import socket
 import threading
 import time
 from pathlib import Path
@@ -44,6 +45,25 @@ def test_stale_session_is_removed_when_connection_fails(
     assert not session_file.exists()
 
 
+def test_response_timeout_preserves_a_live_session(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_session(43210, "secret")
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.recv.side_effect = socket.timeout
+    monkeypatch.setattr(
+        "cla.session.socket.create_connection", Mock(return_value=connection)
+    )
+
+    response = send_command("pause")
+
+    assert not response.ok
+    assert response.message == "playback control timed out; session may still be active"
+    assert session_file.exists()
+
+
 def test_malformed_session_is_treated_as_inactive(
     session_file: Path,
 ) -> None:
@@ -56,7 +76,7 @@ def test_malformed_session_is_treated_as_inactive(
 
 
 def test_worker_serves_controls_over_loopback_and_cleans_up(
-    session_file: Path,
+    session_file: Path, tmp_path: Path
 ) -> None:
     class Process:
         returncode = None
@@ -79,12 +99,18 @@ def test_worker_serves_controls_over_loopback_and_cleans_up(
         popen=lambda *args, **kwargs: Process(),
     )
     result = []
-    worker = threading.Thread(target=lambda: result.append(_serve(controller)))
+    startup_status = tmp_path / "startup.json"
+    worker = threading.Thread(
+        target=lambda: result.append(_serve(controller, startup_status))
+    )
     worker.start()
     deadline = time.monotonic() + 2
     while read_session() is None and time.monotonic() < deadline:
         time.sleep(0.01)
 
+    startup = json.loads(startup_status.read_text(encoding="utf-8"))
+    assert startup["ok"] is True
+    assert read_session() is not None
     assert send_command("pause").ok
     assert controller.paused
     assert send_command("_shutdown").ok
@@ -93,3 +119,70 @@ def test_worker_serves_controls_over_loopback_and_cleans_up(
     assert not worker.is_alive()
     assert result == [0]
     assert not session_file.exists()
+
+
+def test_ffplay_start_failure_is_published_to_parent(
+    session_file: Path, tmp_path: Path
+) -> None:
+    def fail_to_start(*args, **kwargs):
+        raise OSError("cannot execute")
+
+    controller = PlaybackController(
+        "/tools/ffplay",
+        [Track(Path("song.mp3"), track=1, disc=1, duration=60.0)],
+        popen=fail_to_start,
+    )
+    startup_status = tmp_path / "startup.json"
+
+    assert _serve(controller, startup_status) == 1
+
+    startup = json.loads(startup_status.read_text(encoding="utf-8"))
+    assert startup["ok"] is False
+    assert "cannot execute" in startup["error"]
+    assert not session_file.exists()
+
+
+def test_later_control_works_after_a_timed_out_slow_command(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class SlowProcess:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            time.sleep(0.05)
+            self.returncode = -15
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    controller = PlaybackController(
+        "/tools/ffplay",
+        [Track(Path("song.mp3"), track=1, disc=1, duration=60.0)],
+        popen=lambda *args, **kwargs: SlowProcess(),
+    )
+    result = []
+    worker = threading.Thread(target=lambda: result.append(_serve(controller)))
+    worker.start()
+    deadline = time.monotonic() + 2
+    while read_session() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    monkeypatch.setattr("cla.session.CONTROL_TIMEOUT_SECONDS", 0.01)
+    timed_out = send_command("pause")
+    assert not timed_out.ok
+    assert session_file.exists()
+
+    time.sleep(0.08)
+    monkeypatch.setattr("cla.session.CONTROL_TIMEOUT_SECONDS", 0.2)
+    assert send_command("play").ok
+    assert send_command("_shutdown").ok
+    worker.join(timeout=2)
+
+    assert result == [0]

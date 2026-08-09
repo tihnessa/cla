@@ -13,7 +13,9 @@ from typing import Optional
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 4096
-CONTROL_TIMEOUT_SECONDS = 1.0
+# A controller operation may spend two seconds waiting for FFplay to terminate,
+# then another two seconds waiting after a forced kill.
+CONTROL_TIMEOUT_SECONDS = 5.0
 COMMAND_ALIASES = {
     "skip": "next",
     "next": "next",
@@ -167,6 +169,10 @@ def send_command(command: str) -> ControlResponse:
         if message is not None and not isinstance(message, str):
             raise ValueError("invalid control response")
         return ControlResponse(response_data["ok"], message)
+    except socket.timeout:
+        return ControlResponse(
+            False, "playback control timed out; session may still be active"
+        )
     except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
         current = read_session()
         if current is not None and current.token == descriptor.token:

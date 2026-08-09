@@ -144,7 +144,23 @@ def test_worker_is_started_with_platform_background_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest = tmp_path / "manifest.json"
-    player = Mock()
+    _manifest(manifest, [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    def popen(command, **options):
+        status = Path(command[-1])
+        status.write_text(
+            json.dumps({"pid": 1234, "ok": True, "error": None}),
+            encoding="utf-8",
+        )
+        return Process()
+
+    player = Mock(side_effect=popen)
     monkeypatch.setattr("cla.cli.subprocess.Popen", player)
 
     assert _start_worker(manifest) is None
@@ -162,9 +178,80 @@ def test_worker_is_started_with_platform_background_options(
     else:
         expected_options["start_new_session"] = True
     player.assert_called_once_with(
-        [os.sys.executable, "-m", "cla.worker", str(manifest)],
+        [
+            os.sys.executable,
+            "-m",
+            "cla.worker",
+            str(manifest),
+            player.call_args.args[0][-1],
+        ],
         **expected_options,
     )
+
+
+def test_start_worker_reports_worker_startup_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 4321
+
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return -15
+
+        def kill(self):
+            raise AssertionError("terminate should be sufficient")
+
+    process = Process()
+
+    def popen(command, **options):
+        Path(command[-1]).write_text(
+            json.dumps({"pid": 4321, "ok": False, "error": "invalid manifest"}),
+            encoding="utf-8",
+        )
+        return process
+
+    monkeypatch.setattr("cla.cli.subprocess.Popen", popen)
+
+    assert _start_worker(manifest) == "invalid manifest"
+    assert process.terminated
+    assert not manifest.exists()
+
+
+def test_start_worker_ignores_status_for_another_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 4321
+
+        def poll(self):
+            return 1
+
+    def popen(command, **options):
+        Path(command[-1]).write_text(
+            json.dumps({"pid": 9999, "ok": True, "error": None}),
+            encoding="utf-8",
+        )
+        return Process()
+
+    monkeypatch.setattr("cla.cli.subprocess.Popen", popen)
+
+    error = _start_worker(manifest)
+
+    assert error is not None
+    assert "exited" in error
 
 
 def test_metadata_order_uses_disc_track_and_natural_tiebreaker() -> None:
@@ -218,11 +305,13 @@ def test_worker_warns_and_passes_all_playable_tracks_to_controller(
     serve = Mock(return_value=0)
     monkeypatch.setattr("cla.worker._probe_audio", probe)
     monkeypatch.setattr("cla.worker._serve", serve)
+    startup_status = tmp_path / "startup.json"
 
-    assert worker_main([str(manifest)]) == 0
+    assert worker_main([str(manifest), str(startup_status)]) == 0
     assert not manifest.exists()
     controller = serve.call_args.args[0]
     assert [track.path for track in controller.tracks] == [fails, good]
+    assert serve.call_args.args[1] == startup_status
     errors = capsys.readouterr().err
     assert str(bad) in errors and "invalid data" in errors
 
@@ -238,9 +327,56 @@ def test_worker_warns_when_no_candidate_is_playable(
     monkeypatch.setattr(
         "cla.worker._probe_audio", Mock(return_value=ProbeResult(error="invalid"))
     )
+    startup_status = tmp_path / "startup.json"
 
-    assert worker_main([str(manifest)]) == 0
+    assert worker_main([str(manifest), str(startup_status)]) == 1
     assert "no playable audio files" in capsys.readouterr().err
+    assert json.loads(startup_status.read_text(encoding="utf-8"))["ok"] is False
+
+
+def test_worker_reports_invalid_manifest_to_parent(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("not json", encoding="utf-8")
+    startup_status = tmp_path / "startup.json"
+
+    assert worker_main([str(manifest), str(startup_status)]) == 1
+
+    status = json.loads(startup_status.read_text(encoding="utf-8"))
+    assert status["pid"] == os.getpid()
+    assert status["ok"] is False
+    assert "manifest" in status["error"]
+
+
+def test_start_worker_timeout_terminates_child_and_removes_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = _manifest(tmp_path / "manifest.json", [tmp_path / "track.mp3"])
+
+    class Process:
+        pid = 1234
+
+        def __init__(self):
+            self.terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return -15
+
+        def kill(self):
+            raise AssertionError("terminate should be sufficient")
+
+    process = Process()
+    monkeypatch.setattr("cla.cli.subprocess.Popen", Mock(return_value=process))
+    monkeypatch.setattr("cla.cli.time.monotonic", Mock(side_effect=[0.0, 100.0]))
+
+    assert _start_worker(manifest) == "playback worker timed out during startup"
+    assert process.terminated
+    assert not manifest.exists()
 
 
 def test_play_and_wait_runs_ffplay_synchronously(

@@ -72,9 +72,10 @@ case-insensitive natural filename order, so `track2.mp3` precedes
 
 The command produces no output when playback or a control succeeds, except for
 first/last-track boundary messages. It validates files with `ffprobe`, launches
-audio-only `ffplay` through a detached coordinator, and returns immediately.
-Folder tracks play sequentially. Playback and later controls do not require the
-originating terminal to remain open.
+audio-only `ffplay` through a detached coordinator, and returns after playback
+has started and its control session is ready. Folder tracks play sequentially.
+Playback and later controls do not require the originating terminal to remain
+open.
 
 Supported formats depend on the installed FFmpeg build. Typical builds support
 WAV, MP3, FLAC, OGG/Vorbis, and AAC/M4A. URLs and playlist files are not
@@ -86,6 +87,10 @@ validation timeouts, and failures to start playback. During folder playback, a
 bad file produces an asynchronous warning and later tracks continue. Errors
 that occur inside `ffplay` after startup may also appear in the terminal
 asynchronously.
+
+If a control takes too long, the command reports a timeout but preserves the
+session because the playback worker may still be completing the operation. A
+later control can be issued normally.
 
 ## Development
 

@@ -3,10 +3,12 @@
 import argparse
 import json
 import math
+import os
 import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -26,6 +28,7 @@ from cla.session import (
 
 ACCEPT_TIMEOUT_SECONDS = 0.1
 PROCESS_STOP_TIMEOUT_SECONDS = 2.0
+PROCESS_KILL_TIMEOUT_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -113,7 +116,10 @@ class PlaybackController:
             process.wait(timeout=PROCESS_STOP_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait()
+            try:
+                process.wait(timeout=PROCESS_KILL_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                _warning(self.current.path, "ffplay did not exit after being killed")
 
     def _select(self, index: int) -> ControlResponse:
         self._terminate()
@@ -242,7 +248,33 @@ def _read_manifest(path: Path) -> tuple[list[Path], str, str]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("manifest", type=Path)
+    parser.add_argument("startup_status", type=Path)
     return parser
+
+
+def _publish_startup(path: Path, ok: bool, error: Optional[str] = None) -> None:
+    """Atomically publish this worker's startup result for its parent CLI."""
+    temporary: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{path.name}-",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            json.dump({"pid": os.getpid(), "ok": ok, "error": error}, output)
+        try:
+            temporary.chmod(0o600)
+        except OSError:
+            pass
+        os.replace(temporary, path)
+    except OSError:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise
 
 
 def _read_request(connection: socket.socket, token: str) -> Optional[str]:
@@ -268,18 +300,37 @@ def _read_request(connection: socket.socket, token: str) -> Optional[str]:
     return command if isinstance(command, str) else None
 
 
-def _serve(controller: PlaybackController) -> int:
+def _serve(
+    controller: PlaybackController, startup_status: Optional[Path] = None
+) -> int:
     token = new_token()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(("127.0.0.1", 0))
         server.listen()
         server.settimeout(ACCEPT_TIMEOUT_SECONDS)
-        publish_session(server.getsockname()[1], token)
+        session_published = False
         try:
             start = controller.start()
             if not start.ok:
-                _warning(controller.current.path, start.message or "could not start")
+                error = start.message or "could not start playback"
+                _warning(controller.current.path, error)
+                if startup_status is not None:
+                    _publish_startup(startup_status, False, error)
+                return 1
+            try:
+                publish_session(server.getsockname()[1], token)
+                session_published = True
+                if startup_status is not None:
+                    _publish_startup(startup_status, True)
+            except OSError as error:
+                message = f"could not publish playback session: {error}"
+                _warning(None, message)
+                if startup_status is not None:
+                    try:
+                        _publish_startup(startup_status, False, message)
+                    except OSError:
+                        pass
                 return 1
             while not controller.stopped:
                 controller.tick()
@@ -306,16 +357,24 @@ def _serve(controller: PlaybackController) -> int:
             return 0
         finally:
             controller.shutdown()
-            clear_session(token)
+            if session_published:
+                clear_session(token)
 
 
 def worker_main(argv: Optional[Sequence[str]] = None) -> int:
     """Probe, order, and control a file or folder playback snapshot."""
-    manifest = _parser().parse_args(argv).manifest
+    arguments = _parser().parse_args(argv)
+    manifest = arguments.manifest
+    startup_status = arguments.startup_status
     try:
         files, ffprobe, ffplay = _read_manifest(manifest)
     except (OSError, ValueError, json.JSONDecodeError) as error:
-        _warning(None, f"could not read playback manifest: {error}")
+        message = f"could not read playback manifest: {error}"
+        _warning(None, message)
+        try:
+            _publish_startup(startup_status, False, message)
+        except OSError:
+            pass
         return 1
 
     tracks = []
@@ -343,9 +402,23 @@ def worker_main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     if not tracks:
-        _warning(None, "no playable audio files were found")
-        return 0
-    return _serve(PlaybackController(ffplay, tracks))
+        message = "no playable audio files were found"
+        _warning(None, message)
+        try:
+            _publish_startup(startup_status, False, message)
+        except OSError:
+            pass
+        return 1
+    try:
+        return _serve(PlaybackController(ffplay, tracks), startup_status)
+    except OSError as error:
+        message = f"could not start playback worker: {error}"
+        _warning(None, message)
+        try:
+            _publish_startup(startup_status, False, message)
+        except OSError:
+            pass
+        return 1
 
 
 if __name__ == "__main__":

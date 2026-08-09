@@ -6,7 +6,14 @@ from unittest.mock import Mock
 
 import pytest
 
-from cla.cli import FFMPEG_DOWNLOAD_URL, ProbeResult, _probe_audio, main
+from cla.cli import (
+    FFMPEG_DOWNLOAD_URL,
+    ProbeResult,
+    _probe_audio,
+    _stop_existing_session,
+    main,
+)
+from cla.session import ControlResponse, SessionDescriptor
 
 
 def _install_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,6 +183,21 @@ def test_reports_failure_to_start_worker(
     assert "cannot execute" in capsys.readouterr().err
 
 
+def test_replacement_waits_until_previous_session_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous = SessionDescriptor(43210, "previous", 1234)
+    read_session = Mock(side_effect=[previous, previous, None])
+    shutdown = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli.read_session", read_session)
+    monkeypatch.setattr("cla.cli.send_command", shutdown)
+    monkeypatch.setattr("cla.cli.time.sleep", Mock())
+
+    assert _stop_existing_session() is None
+    shutdown.assert_called_once_with("_shutdown")
+    assert read_session.call_count == 3
+
+
 def test_probes_and_starts_playback_in_background(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -185,7 +207,21 @@ def test_probes_and_starts_playback_in_background(
     path.touch()
     _install_tools(monkeypatch)
     probe = Mock(return_value=_successful_probe())
-    player = Mock()
+
+    class Process:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+    def popen(command, **options):
+        Path(command[-1]).write_text(
+            json.dumps({"pid": 1234, "ok": True, "error": None}),
+            encoding="utf-8",
+        )
+        return Process()
+
+    player = Mock(side_effect=popen)
     monkeypatch.setattr("cla.cli.subprocess.run", probe)
     monkeypatch.setattr("cla.cli.subprocess.Popen", player)
 
