@@ -5,10 +5,11 @@ from unittest.mock import Mock
 import pytest
 
 from cla.cli import main
-from cla.session import CONTROL_COMMANDS, ControlResponse
+from cla.session import CONTROL_COMMANDS, ControlResponse, SessionDescriptor
 from cla.worker import PlaybackController, Track
 
 EXPECTED_CONTROL_COMMANDS = {
+    "kill",
     "pause",
     "play",
     "skip",
@@ -207,6 +208,21 @@ def test_natural_completion_advances_but_intentional_stop_does_not(controller) -
     assert player.index == 1
 
 
+def test_kill_terminates_playback_without_advancing_playlist(controller) -> None:
+    player, _, processes = controller
+    process = processes[0][2]
+
+    response = player.handle("kill")
+    player.tick()
+
+    assert response == ControlResponse(True)
+    assert process.terminated
+    assert player.process is None
+    assert player.stopped
+    assert player.index == 0
+    assert len(processes) == 1
+
+
 def test_player_process_uses_detached_stream_options(controller) -> None:
     _, _, processes = controller
     _, options, _ = processes[0]
@@ -218,7 +234,7 @@ def test_player_process_uses_detached_stream_options(controller) -> None:
     }
 
 
-def test_public_control_commands_use_rw_and_exclude_rew() -> None:
+def test_public_control_commands_include_kill_and_exclude_rew() -> None:
     assert CONTROL_COMMANDS == EXPECTED_CONTROL_COMMANDS
 
 
@@ -263,3 +279,19 @@ def test_cli_prints_boundary_and_reports_missing_session(
     )
     assert main(["pause"]) == 1
     assert "no active playback session" in capsys.readouterr().err
+
+
+def test_cli_kill_waits_for_session_cleanup_and_succeeds_silently(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    descriptor = SessionDescriptor(43210, "secret", 1234)
+    monkeypatch.setattr(
+        "cla.cli.read_session", Mock(side_effect=[descriptor, descriptor, None])
+    )
+    request = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr("cla.cli.time.sleep", Mock())
+
+    assert main(["kill"]) == 0
+    assert capsys.readouterr() == ("", "")
+    request.assert_called_once_with("kill")

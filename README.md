@@ -45,6 +45,7 @@ cla ff          # seek forward 10 seconds
 cla rw          # seek backward 10 seconds
 cla replay      # restart the current track
 cla restart     # restart the playlist from its first track
+cla kill        # stop playback and discard the playlist
 ```
 
 Starting another file or folder stops and replaces the current session. Concurrent
@@ -62,7 +63,8 @@ track stops playback. `restart` and `replay` are equivalent for a single-file
 session. A control issued without an active session reports an error.
 
 Bare control names are reserved: `pause`, `play`, `skip`, `next`, `back`,
-`prev`, `ff`, `rw`, `replay`, and `restart` always control the active session.
+`prev`, `ff`, `rw`, `replay`, `restart`, and `kill` always control the active
+session.
 To play a file or directory with one of those names, qualify it as a path, such
 as `./next`, `../next`, `album/next`, or an absolute path.
 
