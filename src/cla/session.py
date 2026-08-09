@@ -30,7 +30,7 @@ COMMAND_ALIASES = {
     "pause": "pause",
     "play": "play",
     "ff": "ff",
-    "rew": "rew",
+    "rw": "rw",
     "replay": "replay",
     "restart": "restart",
 }

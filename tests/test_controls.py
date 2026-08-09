@@ -8,6 +8,19 @@ from cla.cli import main
 from cla.session import CONTROL_COMMANDS, ControlResponse
 from cla.worker import PlaybackController, Track
 
+EXPECTED_CONTROL_COMMANDS = {
+    "pause",
+    "play",
+    "skip",
+    "next",
+    "back",
+    "prev",
+    "ff",
+    "rw",
+    "replay",
+    "restart",
+}
+
 
 class FakeProcess:
     def __init__(self) -> None:
@@ -94,10 +107,19 @@ def test_rewind_clamps_and_preserves_paused_state(controller) -> None:
     now[0] += 4
     player.handle("pause")
 
-    assert player.handle("rew").ok
+    assert player.handle("rw").ok
     assert player.offset == 0
     assert player.paused
     assert len(processes) == 1
+
+
+def test_removed_rew_command_is_rejected_by_worker(controller) -> None:
+    player, _, _ = controller
+
+    response = player.handle("rew")
+
+    assert not response.ok
+    assert response.message == "unknown playback command"
 
 
 def test_fast_forward_crosses_tracks_and_stops_after_final_track(controller) -> None:
@@ -196,15 +218,33 @@ def test_player_process_uses_detached_stream_options(controller) -> None:
     }
 
 
-@pytest.mark.parametrize("command", sorted(CONTROL_COMMANDS))
-def test_cli_accepts_every_control_command(
-    command: str, monkeypatch: pytest.MonkeyPatch
+def test_public_control_commands_use_rw_and_exclude_rew() -> None:
+    assert CONTROL_COMMANDS == EXPECTED_CONTROL_COMMANDS
+
+
+@pytest.mark.parametrize("command", sorted(EXPECTED_CONTROL_COMMANDS))
+def test_bare_control_command_wins_over_a_colliding_file(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / command).touch()
+    monkeypatch.chdir(tmp_path)
     request = Mock(return_value=ControlResponse(True))
     monkeypatch.setattr("cla.cli.send_command", request)
 
     assert main([command]) == 0
     request.assert_called_once_with(command)
+
+
+def test_bare_control_command_wins_over_a_colliding_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "next").mkdir()
+    monkeypatch.chdir(tmp_path)
+    request = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli.send_command", request)
+
+    assert main(["next"]) == 0
+    request.assert_called_once_with("next")
 
 
 def test_cli_prints_boundary_and_reports_missing_session(

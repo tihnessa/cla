@@ -206,9 +206,7 @@ class PlaybackController:
             return self._select(0)
 
         position = self._position()
-        new_offset = (
-            max(0.0, position - 10.0) if canonical == "rew" else position + 10.0
-        )
+        new_offset = max(0.0, position - 10.0) if canonical == "rw" else position + 10.0
         was_paused = self.paused
         self._terminate()
         if canonical == "ff" and new_offset >= self.current.duration:
