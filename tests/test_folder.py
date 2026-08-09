@@ -1,6 +1,9 @@
 import json
 import os
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -10,6 +13,9 @@ from cla.cli import (
     ProbeResult,
     _directory_candidates,
     _start_worker,
+    _stop_posix_worker_tree,
+    _stop_windows_worker_tree,
+    _stop_worker,
     _write_manifest,
     main,
 )
@@ -213,6 +219,7 @@ def test_start_worker_reports_worker_startup_error(
             raise AssertionError("terminate should be sufficient")
 
     process = Process()
+    stop_worker = Mock(side_effect=lambda child: child.terminate())
 
     def popen(command, **options):
         Path(command[-1]).write_text(
@@ -222,8 +229,10 @@ def test_start_worker_reports_worker_startup_error(
         return process
 
     monkeypatch.setattr("cla.cli.subprocess.Popen", popen)
+    monkeypatch.setattr("cla.cli._stop_worker", stop_worker)
 
     assert _start_worker(manifest) == "invalid manifest"
+    stop_worker.assert_called_once_with(process)
     assert process.terminated
     assert not manifest.exists()
 
@@ -399,10 +408,114 @@ def test_start_worker_timeout_terminates_child_and_removes_manifest(
     process = Process()
     monkeypatch.setattr("cla.cli.subprocess.Popen", Mock(return_value=process))
     monkeypatch.setattr("cla.cli.time.monotonic", Mock(side_effect=[0.0, 100.0]))
+    stop_worker = Mock(side_effect=lambda child: child.terminate())
+    monkeypatch.setattr("cla.cli._stop_worker", stop_worker)
 
     assert _start_worker(manifest) == "playback worker timed out during startup"
+    stop_worker.assert_called_once_with(process)
     assert process.terminated
     assert not manifest.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
+def test_posix_worker_cleanup_signals_the_entire_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = Mock(pid=4321)
+    process.wait.return_value = -15
+    killpg = Mock()
+    monkeypatch.setattr("cla.cli.os.killpg", killpg)
+
+    _stop_posix_worker_tree(process)
+
+    assert killpg.call_args_list == [
+        ((4321, signal.SIGTERM),),
+        ((4321, signal.SIGKILL),),
+    ]
+    process.terminate.assert_not_called()
+    process.wait.assert_called_once()
+
+
+def test_windows_worker_cleanup_uses_tree_aware_termination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = Mock(pid=4321)
+    taskkill = Mock(return_value=subprocess.CompletedProcess([], 0))
+    monkeypatch.setattr("cla.cli.subprocess.run", taskkill)
+
+    _stop_windows_worker_tree(process)
+
+    taskkill.assert_called_once_with(
+        ["taskkill", "/PID", "4321", "/T", "/F"],
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=2.0,
+    )
+    process.kill.assert_not_called()
+    process.wait.assert_called_once_with(timeout=2.0)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group regression")
+def test_worker_cleanup_terminates_a_live_startup_descendant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    terminated = tmp_path / "descendant-terminated"
+    ready = tmp_path / "descendant-ready"
+    child_code = """
+import signal
+import sys
+import time
+from pathlib import Path
+
+def stop(*_args):
+    Path(sys.argv[1]).write_text("terminated", encoding="utf-8")
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+Path(sys.argv[2]).write_text("ready", encoding="utf-8")
+while True:
+    time.sleep(1)
+"""
+    worker_code = """
+import signal
+import subprocess
+import sys
+import time
+
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[1], sys.argv[2], sys.argv[3]],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(1)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", worker_code, child_code, str(terminated), str(ready)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 2
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        monkeypatch.setattr("cla.cli.WORKER_STOP_TIMEOUT_SECONDS", 0.2)
+
+        _stop_worker(process)
+
+        assert process.poll() is not None
+        assert terminated.read_text(encoding="utf-8") == "terminated"
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=2)
 
 
 def test_play_and_wait_runs_ffplay_synchronously(

@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -357,17 +358,57 @@ def _read_startup_status(
 
 
 def _stop_worker(process: object) -> None:
+    """Stop a failed startup without leaving FFprobe or FFplay descendants."""
     try:
         if process.poll() is not None:  # type: ignore[attr-defined]
             return
-        process.terminate()  # type: ignore[attr-defined]
-        try:
-            process.wait(timeout=WORKER_STOP_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
-        except subprocess.TimeoutExpired:
-            process.kill()  # type: ignore[attr-defined]
-            process.wait(timeout=WORKER_STOP_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
+        if os.name == "nt":
+            _stop_windows_worker_tree(process)
+        else:
+            _stop_posix_worker_tree(process)
     except (OSError, subprocess.TimeoutExpired):
         pass
+
+
+def _stop_posix_worker_tree(process: object) -> None:
+    """Signal the process group created for the detached worker."""
+    pid = process.pid  # type: ignore[attr-defined]
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except OSError:
+        process.terminate()  # type: ignore[attr-defined]
+
+    try:
+        process.wait(timeout=WORKER_STOP_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            process.kill()  # type: ignore[attr-defined]
+        process.wait(timeout=WORKER_STOP_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
+        return
+
+    # The worker can exit before a descendant that ignored SIGTERM. Its process
+    # group still has the worker PID as its ID, so ensure no member survives.
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _stop_windows_worker_tree(process: object) -> None:
+    """Use Windows' tree-aware termination for the worker process group."""
+    result = subprocess.run(
+        ["taskkill", "/PID", str(process.pid), "/T", "/F"],  # type: ignore[attr-defined]
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=WORKER_STOP_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0 and process.poll() is None:  # type: ignore[attr-defined]
+        process.kill()  # type: ignore[attr-defined]
+    process.wait(timeout=WORKER_STOP_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
 
 
 def _stop_existing_session() -> Optional[str]:
