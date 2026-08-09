@@ -69,11 +69,14 @@ class PlaybackController:
         ffplay: str,
         tracks: Sequence[Track],
         *,
+        input_order_authoritative: bool = False,
         clock: Callable[[], float] = time.monotonic,
         popen: Callable[..., Any] = subprocess.Popen,
     ) -> None:
         self.ffplay = ffplay
-        self.tracks = _order_tracks(tracks)
+        self.tracks = (
+            list(tracks) if input_order_authoritative else _order_tracks(tracks)
+        )
         self.clock = clock
         self.popen = popen
         self.index = 0
@@ -242,7 +245,7 @@ def _play_and_wait(ffplay: str, audio_file: Path) -> Optional[str]:
     return None
 
 
-def _read_manifest(path: Path) -> tuple[list[Path], str, str]:
+def _read_manifest(path: Path) -> tuple[list[Path], str, str, bool]:
     try:
         with path.open(encoding="utf-8") as manifest:
             data = json.load(manifest)
@@ -254,14 +257,16 @@ def _read_manifest(path: Path) -> tuple[list[Path], str, str]:
     files = data.get("files")
     ffprobe = data.get("ffprobe")
     ffplay = data.get("ffplay")
+    input_order_authoritative = data.get("input_order_authoritative", False)
     if (
         not isinstance(files, list)
         or not all(isinstance(file, str) for file in files)
         or not isinstance(ffprobe, str)
         or not isinstance(ffplay, str)
+        or not isinstance(input_order_authoritative, bool)
     ):
         raise ValueError("invalid playback manifest")
-    return [Path(file) for file in files], ffprobe, ffplay
+    return [Path(file) for file in files], ffprobe, ffplay, input_order_authoritative
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -395,7 +400,7 @@ def worker_main(argv: Optional[Sequence[str]] = None) -> int:
     manifest = arguments.manifest
     startup_status = arguments.startup_status
     try:
-        files, ffprobe, ffplay = _read_manifest(manifest)
+        files, ffprobe, ffplay, input_order_authoritative = _read_manifest(manifest)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         message = f"could not read playback manifest: {error}"
         _warning(None, message)
@@ -438,7 +443,14 @@ def worker_main(argv: Optional[Sequence[str]] = None) -> int:
             pass
         return 1
     try:
-        return _serve(PlaybackController(ffplay, tracks), startup_status)
+        return _serve(
+            PlaybackController(
+                ffplay,
+                tracks,
+                input_order_authoritative=input_order_authoritative,
+            ),
+            startup_status,
+        )
     except OSError as error:
         message = f"could not start playback worker: {error}"
         _warning(None, message)

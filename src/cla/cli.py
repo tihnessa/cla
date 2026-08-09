@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from cla.session import (
     CONTROL_COMMANDS,
@@ -32,6 +33,7 @@ STARTUP_GRACE_SECONDS = 5.0
 STARTUP_POLL_INTERVAL_SECONDS = 0.01
 WORKER_STOP_TIMEOUT_SECONDS = 2.0
 AUDIO_EXTENSIONS = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"})
+PLAYLIST_EXTENSION = ".m3u"
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,14 @@ class ProbeResult:
     disc: Optional[int] = None
     duration: Optional[float] = None
     error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FolderSources:
+    """Playable source types discovered directly inside a folder."""
+
+    audio_files: list[Path]
+    playlists: list[Path]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -55,7 +65,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "target",
         metavar="path|command",
-        help="audio file/folder path or playback control command",
+        help="audio file, M3U playlist, folder path, or playback control command",
     )
     return parser
 
@@ -63,6 +73,10 @@ def _parser() -> argparse.ArgumentParser:
 def _error(message: str) -> int:
     print(f"cla: error: {message}", file=sys.stderr)
     return 1
+
+
+def _warning(subject: object, message: str) -> None:
+    print(f"cla: warning: {subject!s}: {message}", file=sys.stderr)
 
 
 def _readable_file(path: Path) -> Optional[Path]:
@@ -86,27 +100,142 @@ def _natural_key(path: Path) -> tuple[tuple[int, object], ...]:
 
 
 def _directory_candidates(path: Path) -> tuple[list[Path], Optional[str]]:
+    sources, error = _directory_sources(path)
+    if error is not None:
+        return [], error
+    if not sources.audio_files:
+        return [], f"{path!s} contains no supported audio files"
+    return sources.audio_files, None
+
+
+def _directory_sources(path: Path) -> tuple[FolderSources, Optional[str]]:
     try:
         resolved = path.expanduser().resolve()
         if not resolved.is_dir():
-            return [], f"{path!s} is not a readable directory"
+            return FolderSources([], []), f"{path!s} is not a readable directory"
         children = list(resolved.iterdir())
     except OSError:
-        return [], f"{path!s} is not a readable directory"
+        return FolderSources([], []), f"{path!s} is not a readable directory"
 
-    candidates = []
+    audio_files = []
+    playlists = []
     for child in children:
-        if child.suffix.casefold() not in AUDIO_EXTENSIONS:
+        suffix = child.suffix.casefold()
+        if suffix not in AUDIO_EXTENSIONS and suffix != PLAYLIST_EXTENSION:
             continue
         try:
-            if child.is_file():
-                candidates.append(child.resolve())
+            if not child.is_file():
+                continue
+            candidate = child.resolve()
         except OSError:
-            candidates.append(child.absolute())
+            candidate = child.absolute()
+        if suffix == PLAYLIST_EXTENSION:
+            playlists.append(candidate)
+        else:
+            audio_files.append(candidate)
+
+    if not audio_files and not playlists:
+        return (
+            FolderSources([], []),
+            f"{path!s} contains no supported audio files or M3U playlists",
+        )
+    return FolderSources(
+        sorted(audio_files, key=_natural_key),
+        sorted(playlists, key=_natural_key),
+    ), None
+
+
+def _is_url_entry(value: str) -> bool:
+    try:
+        scheme = urlsplit(value).scheme
+    except ValueError:
+        return re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value) is not None
+    if not scheme:
+        return False
+    return not (len(scheme) == 1 and len(value) > 2 and value[1] == ":")
+
+
+def _playlist_candidates(path: Path) -> tuple[list[Path], Optional[str]]:
+    """Read supported local audio paths from an M3U in declared order."""
+    try:
+        playlist = path.expanduser().resolve()
+        with playlist.open(encoding="utf-8-sig") as input_file:
+            lines = input_file.readlines()
+    except (OSError, UnicodeError) as error:
+        return [], f"could not read playlist {path!s}: {error}"
+
+    candidates = []
+    for raw_line in lines:
+        entry = raw_line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if _is_url_entry(entry):
+            _warning(entry, "URL entries are not supported")
+            continue
+        candidate = Path(entry).expanduser()
+        if candidate.suffix.casefold() not in AUDIO_EXTENSIONS:
+            _warning(entry, "unsupported audio type")
+            continue
+        if not candidate.is_absolute():
+            candidate = playlist.parent / candidate
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            candidate = candidate.absolute()
+        candidates.append(candidate)
 
     if not candidates:
-        return [], f"{path!s} contains no supported audio files"
-    return sorted(candidates, key=_natural_key), None
+        return [], f"{path!s} contains no supported local audio entries"
+    return candidates, None
+
+
+def _numbered_choice(
+    title: str, labels: Sequence[str]
+) -> tuple[Optional[int], Optional[str]]:
+    print(title)
+    for number, label in enumerate(labels, start=1):
+        print(f"{number}. {label}")
+    try:
+        answer = input("Selection (q to cancel): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None, "selection cancelled because interactive input is unavailable"
+    if answer.casefold() == "q":
+        return None, "selection cancelled"
+    try:
+        selected = int(answer)
+    except ValueError:
+        return None, "invalid selection"
+    if not 1 <= selected <= len(labels):
+        return None, "invalid selection"
+    return selected - 1, None
+
+
+def _select_folder_source(
+    sources: FolderSources,
+) -> tuple[list[Path], bool, Optional[str]]:
+    use_playlist = not sources.audio_files
+    if sources.audio_files and sources.playlists:
+        selected, error = _numbered_choice(
+            "Select a playback source:", ["Loose audio files", "M3U playlist"]
+        )
+        if error is not None:
+            return [], False, error
+        use_playlist = selected == 1
+
+    if not use_playlist:
+        return sources.audio_files, False, None
+
+    playlist = sources.playlists[0]
+    if len(sources.playlists) > 1:
+        selected, error = _numbered_choice(
+            "Select an M3U playlist:", [path.name for path in sources.playlists]
+        )
+        if error is not None:
+            return [], False, error
+        assert selected is not None
+        playlist = sources.playlists[selected]
+    candidates, error = _playlist_candidates(playlist)
+    return candidates, True, error
 
 
 def _find_tool(name: str) -> Optional[str]:
@@ -237,7 +366,13 @@ def _background_options() -> dict[str, object]:
     return options
 
 
-def _write_manifest(files: Sequence[Path], ffprobe: str, ffplay: str) -> Path:
+def _write_manifest(
+    files: Sequence[Path],
+    ffprobe: str,
+    ffplay: str,
+    *,
+    input_order_authoritative: bool = False,
+) -> Path:
     manifest_path: Optional[Path] = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -253,6 +388,7 @@ def _write_manifest(files: Sequence[Path], ffprobe: str, ffplay: str) -> Path:
                     "files": [str(path) for path in files],
                     "ffprobe": ffprobe,
                     "ffplay": ffplay,
+                    "input_order_authoritative": input_order_authoritative,
                 },
                 manifest,
                 ensure_ascii=False,
@@ -520,6 +656,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _error(f"{target!s} is not a readable file or directory")
 
     if is_file:
+        if resolved.suffix.casefold() == PLAYLIST_EXTENSION:
+            candidates, playlist_error = _playlist_candidates(resolved)
+            if playlist_error is not None:
+                return _error(playlist_error)
+            ffprobe, ffplay, tool_error = _tools()
+            if tool_error is not None:
+                return _error(tool_error)
+            assert ffprobe is not None and ffplay is not None
+            try:
+                with playback_launch_lock():
+                    shutdown_error = _stop_existing_session()
+                    if shutdown_error is not None:
+                        return _error(shutdown_error)
+                    manifest = _write_manifest(
+                        candidates,
+                        ffprobe,
+                        ffplay,
+                        input_order_authoritative=True,
+                    )
+                    worker_error = _start_worker(manifest)
+            except (OSError, TypeError) as error:
+                return _error(f"could not coordinate playlist playback launch: {error}")
+            if worker_error is not None:
+                manifest.unlink(missing_ok=True)
+                return _error(worker_error)
+            return 0
+
         audio_file = _readable_file(resolved)
         if audio_file is None:
             return _error(f"{target!s} is not a readable file")
@@ -547,9 +710,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if is_directory:
-        candidates, directory_error = _directory_candidates(resolved)
+        sources, directory_error = _directory_sources(resolved)
         if directory_error is not None:
             return _error(directory_error)
+        candidates, authoritative_order, selection_error = _select_folder_source(
+            sources
+        )
+        if selection_error is not None:
+            return _error(selection_error)
         ffprobe, ffplay, tool_error = _tools()
         if tool_error is not None:
             return _error(tool_error)
@@ -559,7 +727,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 shutdown_error = _stop_existing_session()
                 if shutdown_error is not None:
                     return _error(shutdown_error)
-                manifest = _write_manifest(candidates, ffprobe, ffplay)
+                if authoritative_order:
+                    manifest = _write_manifest(
+                        candidates,
+                        ffprobe,
+                        ffplay,
+                        input_order_authoritative=True,
+                    )
+                else:
+                    manifest = _write_manifest(candidates, ffprobe, ffplay)
                 worker_error = _start_worker(manifest)
         except (OSError, TypeError) as error:
             return _error(f"could not coordinate folder playback launch: {error}")

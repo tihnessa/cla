@@ -1,8 +1,8 @@
 # cla
 
 A simple, cross-platform command-line audio player for Python 3.9 and newer.
-It plays a file or folder in the background and returns control to the terminal
-once playback has started and its control session is ready.
+It plays a file, M3U playlist, or folder in the background and returns control
+to the terminal once playback has started and its control session is ready.
 
 ## Requirements
 
@@ -34,6 +34,12 @@ Play the supported audio files directly inside a folder:
 cla path/to/album
 ```
 
+Play a local M3U playlist in its declared order:
+
+```bash
+cla path/to/mix.m3u
+```
+
 Control the active playback session from any terminal:
 
 ```bash
@@ -48,9 +54,9 @@ cla restart     # restart the playlist from its first track
 cla kill        # stop playback and discard the playlist
 ```
 
-Starting another file or folder stops and replaces the current session. Concurrent
-launch requests are serialized through replacement and startup, so only the most
-recent ready worker remains active.
+Starting another file, playlist, or folder stops and replaces the current session.
+Concurrent launch requests are serialized through replacement and startup, so only
+the most recent ready worker remains active.
 Navigation never wraps or changes the established playlist order. `skip` on
 the final track and `back` on the first track leave playback unchanged and
 print a clear message. Navigation, `replay`, and `restart` start the selected
@@ -70,7 +76,13 @@ as `./next`, `../next`, `album/next`, or an absolute path.
 
 Folder playback is non-recursive. It considers regular files with these
 case-insensitive extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.aac`, and
-`.m4a`.
+`.m4a`, as well as `.m3u` playlists. A folder containing one playlist and no
+loose audio tracks plays that playlist automatically. Multiple playlists, or a
+mixture of playlists and loose tracks, produce deterministic numbered choices.
+Enter `q` to cancel. Invalid, cancelled, or unavailable interactive input is
+reported without replacing an active playback session. Audio and playlists in
+nested folders are not discovered, although a chosen playlist may explicitly
+refer to audio in another folder.
 
 When every playable file has valid track metadata, files are ordered by disc
 number, track number, and then natural filename order. Container metadata is
@@ -78,6 +90,15 @@ preferred over audio-stream metadata, and a missing disc number defaults to
 disc 1. If any playable file lacks a valid track number, the entire folder uses
 case-insensitive natural filename order, so `track2.mp3` precedes
 `track10.mp3`.
+
+M3U files are read as UTF-8 with an optional byte-order mark. Blank lines and
+metadata or comment lines beginning with `#` are ignored. Relative paths are
+resolved from the playlist's directory, and absolute local paths are accepted.
+Playlist order is authoritative and is not changed by track metadata or filename
+sorting. URL entries and files with unsupported extensions are skipped with a
+warning, as are missing, unreadable, invalid, audio-less, or otherwise unplayable
+entries. If no playable entries remain, `cla` reports an error and does not
+publish a new playback session.
 
 The command produces no output when playback or a control succeeds, except for
 first/last-track boundary messages. It validates files with `ffprobe`, launches
@@ -87,15 +108,13 @@ Playback and later controls do not require the originating terminal to remain
 open.
 
 Supported formats depend on the installed FFmpeg build. Typical builds support
-WAV, MP3, FLAC, OGG/Vorbis, and AAC/M4A. URLs and playlist files are not
-supported.
+WAV, MP3, FLAC, OGG/Vorbis, and AAC/M4A. URLs are not supported.
 
 Errors are written to standard error for missing or unreadable paths, folders
 without matching files, missing FFmpeg tools, invalid or audio-less media,
-validation timeouts, and failures to start playback. During folder playback, a
-bad file produces an asynchronous warning and later tracks continue. Errors
-that occur inside `ffplay` after startup may also appear in the terminal
-asynchronously.
+validation timeouts, and failures to start playback. During folder or playlist
+playback, a bad file produces a warning and later tracks continue. Errors that
+occur inside `ffplay` after startup may also appear in the terminal asynchronously.
 
 If a control takes too long, the command reports a timeout but preserves the
 session because the playback worker may still be completing the operation. A
