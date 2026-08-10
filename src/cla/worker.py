@@ -151,7 +151,7 @@ class PlaybackController:
         return self._launch()
 
     def confirm_started(self) -> ControlResponse:
-        """Confirm the initial player remains alive through its startup window."""
+        """Confirm a newly launched player remains alive through startup."""
         deadline = time.monotonic() + PLAYER_STARTUP_GRACE_SECONDS
         while True:
             process = self.process
@@ -216,6 +216,8 @@ class PlaybackController:
         self.offset = 0.0
         self.paused = False
         response = self._launch()
+        if response.ok:
+            response = self.confirm_started()
         if response.ok:
             return response
 

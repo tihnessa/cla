@@ -356,6 +356,29 @@ def test_failed_restart_of_finished_queue_rolls_back_append(controller) -> None:
     assert player.stopped
 
 
+def test_immediate_exit_when_reviving_finished_queue_rolls_back_append(
+    controller,
+) -> None:
+    player, _, processes = controller
+    player.index = len(player.tracks) - 1
+    player.process = processes[-1][2]
+    player.process.returncode = 0
+    player.tick()
+    original_tracks = list(player.tracks)
+    immediate_exit = FakeProcess()
+    immediate_exit.returncode = 1
+    player.popen = Mock(return_value=immediate_exit)
+
+    response = player.append([Track(Path("new.mp3"), track=1, disc=1, duration=40.0)])
+
+    assert not response.ok
+    assert response.message == "ffplay exited with status 1 during startup"
+    assert player.tracks == original_tracks
+    assert player.index == 1
+    assert player.process is None
+    assert player.stopped
+
+
 def test_kill_terminates_playback_without_advancing_playlist(controller) -> None:
     player, _, processes = controller
     process = processes[0][2]
