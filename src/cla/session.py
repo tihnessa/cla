@@ -19,7 +19,6 @@ from typing import Optional
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 4096
-MAX_RESPONSE_BYTES = 1024 * 1024
 # A controller operation may spend two seconds waiting for FFplay to terminate,
 # then another two seconds waiting after a forced kill.
 CONTROL_TIMEOUT_SECONDS = 5.0
@@ -38,6 +37,7 @@ COMMAND_ALIASES = {
     "replay": "replay",
     "restart": "restart",
     "status": "status",
+    "list": "list",
 }
 CONTROL_COMMANDS = frozenset(COMMAND_ALIASES)
 SEEK_COMMANDS = ("ff", "rw")
@@ -81,6 +81,14 @@ class PlaybackStatus:
 
 
 @dataclass(frozen=True)
+class QueueSnapshot:
+    """A read-only snapshot of the ordered playback queue."""
+
+    labels: tuple[str, ...]
+    current_index: int
+
+
+@dataclass(frozen=True)
 class ControlResponse:
     """A response returned by the playback worker."""
 
@@ -89,6 +97,7 @@ class ControlResponse:
     status: Optional[PlaybackStatus] = None
     unavailable: bool = False
     warnings: tuple[str, ...] = ()
+    queue: Optional[QueueSnapshot] = None
 
 
 @dataclass(frozen=True)
@@ -363,18 +372,16 @@ def clear_session(token: Optional[str] = None) -> None:
         path.unlink(missing_ok=True)
 
 
-def _receive_line(
-    connection: socket.socket, max_bytes: int = MAX_RESPONSE_BYTES
-) -> bytes:
+def _receive_line(connection: socket.socket) -> bytes:
     data = bytearray()
-    while len(data) <= max_bytes:
-        chunk = connection.recv(min(1024, max_bytes + 1 - len(data)))
+    while True:
+        chunk = connection.recv(64 * 1024)
         if not chunk:
             break
         data.extend(chunk)
         if b"\n" in chunk:
             break
-    if len(data) > max_bytes or b"\n" not in data:
+    if b"\n" not in data:
         raise ValueError("invalid control response")
     return bytes(data).split(b"\n", 1)[0]
 
@@ -432,6 +439,7 @@ def _send_request(
         if message is not None and not isinstance(message, str):
             raise ValueError("invalid control response")
         status_data = response_data.get("status")
+        queue_data = response_data.get("queue")
         warnings_data = response_data.get("warnings", [])
         if not isinstance(warnings_data, list) or not all(
             isinstance(warning, str) for warning in warnings_data
@@ -464,10 +472,27 @@ def _send_request(
             ):
                 raise ValueError("invalid control response")
             status = PlaybackStatus(title, elapsed_value, duration_value)
+        queue = None
+        if queue_data is not None:
+            if not isinstance(queue_data, Mapping):
+                raise ValueError("invalid control response")
+            labels = queue_data.get("labels")
+            current_index = queue_data.get("current_index")
+            if (
+                not isinstance(labels, list)
+                or not labels
+                or not all(isinstance(label, str) and label for label in labels)
+                or isinstance(current_index, bool)
+                or not isinstance(current_index, int)
+                or not 1 <= current_index <= len(labels)
+            ):
+                raise ValueError("invalid control response")
+            queue = QueueSnapshot(tuple(labels), current_index)
         return ControlResponse(
             response_data["ok"],
             message,
             status=status,
+            queue=queue,
             warnings=tuple(warnings_data),
         )
     except socket.timeout:
@@ -486,6 +511,7 @@ def _send_request(
 def encode_response(response: ControlResponse) -> bytes:
     """Encode one worker response."""
     status = response.status
+    queue = response.queue
     return (
         json.dumps(
             {
@@ -498,6 +524,14 @@ def encode_response(response: ControlResponse) -> bytes:
                         "duration": status.duration,
                     }
                     if status is not None
+                    else None
+                ),
+                "queue": (
+                    {
+                        "labels": list(queue.labels),
+                        "current_index": queue.current_index,
+                    }
+                    if queue is not None
                     else None
                 ),
                 "warnings": list(response.warnings),

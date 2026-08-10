@@ -21,6 +21,7 @@ from cla.session import (
     CONTROL_COMMANDS,
     CONTROL_TIMEOUT_SECONDS,
     ControlResponse,
+    QueueSnapshot,
     SessionDescriptor,
     is_seek_command,
     parse_seek_command,
@@ -74,7 +75,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Play local audio in the background or control active playback.",
         epilog=(
             "queue: add <path>; controls: pause, play, skip/next, back/prev, "
-            "ff[seconds], rw[seconds], replay, restart, kill, status"
+            "ff[seconds], rw[seconds], replay, restart, kill, status, list"
         ),
     )
     parser.add_argument(
@@ -647,6 +648,89 @@ def _format_time(seconds: float) -> str:
     return f"{minutes:02d}:{remaining_seconds:02d}"
 
 
+PAGER_PROMPT = "--More-- (Enter: line, Space: page, q: quit)"
+
+
+def _terminal_height() -> int:
+    """Return the usable terminal height, falling back when lookup fails."""
+    try:
+        return max(1, shutil.get_terminal_size(fallback=(80, 20)).lines)
+    except OSError:
+        return 20
+
+
+def _read_pager_key() -> Optional[str]:
+    """Read one key without requiring Enter, or return None when unavailable."""
+    try:
+        if not sys.stdin.isatty():
+            return None
+    except (AttributeError, OSError):
+        return None
+
+    if os.name == "nt":
+        try:
+            import msvcrt
+
+            key = msvcrt.getwch()
+        except (EOFError, KeyboardInterrupt, OSError):
+            return None
+        return key or None
+
+    try:
+        import termios
+        import tty
+
+        descriptor = sys.stdin.fileno()
+        settings = termios.tcgetattr(descriptor)
+        try:
+            tty.setraw(descriptor)
+            key = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(descriptor, termios.TCSADRAIN, settings)
+    except (AttributeError, EOFError, KeyboardInterrupt, OSError, ValueError):
+        return None
+    return key if key and key != "\x03" else None
+
+
+def _queue_lines(queue: QueueSnapshot) -> list[str]:
+    return [
+        f"{index}. {'>' if index == queue.current_index else ' '} {label}"
+        for index, label in enumerate(queue.labels, start=1)
+    ]
+
+
+def _print_queue(queue: QueueSnapshot) -> None:
+    """Print a queue directly or page it when it exceeds terminal height."""
+    lines = _queue_lines(queue)
+    height = _terminal_height()
+    if len(lines) <= height:
+        for line in lines:
+            print(line)
+        return
+
+    page_size = max(1, height - 1)
+    position = min(page_size, len(lines))
+    for line in lines[:position]:
+        print(line)
+
+    while position < len(lines):
+        print(PAGER_PROMPT, end="", flush=True)
+        key = _read_pager_key()
+        print(f"\r{' ' * len(PAGER_PROMPT)}\r", end="", flush=True)
+        if key is None or key.casefold() == "q":
+            return
+        if key in ("\r", "\n"):
+            count = 1
+        elif key == " ":
+            count = page_size
+        else:
+            continue
+        next_position = min(len(lines), position + count)
+        for line in lines[position:next_position]:
+            print(line)
+        position = next_position
+
+
 def _tools() -> tuple[Optional[str], Optional[str], Optional[str]]:
     ffprobe = _find_tool("ffprobe")
     if ffprobe is None:
@@ -809,6 +893,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 f"{status.title} — {_format_time(status.elapsed)} / "
                 f"{_format_time(status.duration)}"
             )
+            return 0
+        if argument == "list":
+            if response.unavailable:
+                print("Nothing in queue")
+                return 0
+            if not response.ok:
+                return _error(response.message or "playlist listing failed")
+            if response.queue is None:
+                return _error("invalid control response")
+            _print_queue(response.queue)
             return 0
         if not response.ok:
             return _error(response.message or "playback control failed")

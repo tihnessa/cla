@@ -21,6 +21,7 @@ from cla.session import (
     MAX_MESSAGE_BYTES,
     ControlResponse,
     PlaybackStatus,
+    QueueSnapshot,
     clear_session,
     encode_response,
     is_seek_command,
@@ -70,6 +71,11 @@ def _order_tracks(tracks: Sequence[Track]) -> list[Track]:
             ),
         )
     return sorted(tracks, key=lambda item: _natural_key(item.path))
+
+
+def _track_label(track: Track) -> str:
+    """Return the public label shared by status and queue listings."""
+    return track.title or track.path.name
 
 
 class PlaybackController:
@@ -251,9 +257,17 @@ class PlaybackController:
             return ControlResponse(
                 True,
                 status=PlaybackStatus(
-                    self.current.title or self.current.path.name,
+                    _track_label(self.current),
                     elapsed=self._position(),
                     duration=self.current.duration,
+                ),
+            )
+        if canonical == "list":
+            return ControlResponse(
+                True,
+                queue=QueueSnapshot(
+                    tuple(_track_label(track) for track in self.tracks),
+                    self.index + 1,
                 ),
             )
         if canonical == "kill":
@@ -464,6 +478,7 @@ def _handle_append(
         response.ok,
         response.message,
         status=response.status,
+        queue=response.queue,
         unavailable=response.unavailable,
         warnings=warnings,
     )

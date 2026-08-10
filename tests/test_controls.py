@@ -9,12 +9,14 @@ from cla.session import (
     CONTROL_COMMANDS,
     ControlResponse,
     PlaybackStatus,
+    QueueSnapshot,
     SessionDescriptor,
 )
 from cla.worker import PlaybackController, Track
 
 EXPECTED_CONTROL_COMMANDS = {
     "kill",
+    "list",
     "pause",
     "play",
     "skip",
@@ -149,6 +151,25 @@ def test_status_falls_back_to_filename_and_clamps_elapsed(controller) -> None:
     response = player.handle("status")
 
     assert response.status == PlaybackStatus("track2.mp3", elapsed=30.0, duration=30.0)
+
+
+def test_list_is_an_ordered_read_only_snapshot_with_public_labels(controller) -> None:
+    player, _, processes = controller
+
+    response = player.handle("list")
+
+    assert response.queue == QueueSnapshot(("First track", "track2.mp3"), 1)
+    assert player.index == 0
+    assert player.offset == 0
+    assert not player.paused
+    assert len(processes) == 1
+
+    assert player.handle("next").ok
+    player.tracks[1] = Track(Path("private/track2.mp3"), track=2, disc=1, duration=30.0)
+
+    assert player.handle("list").queue == QueueSnapshot(
+        ("First track", "track2.mp3"), 2
+    )
 
 
 def test_rewind_clamps_and_preserves_paused_state(controller) -> None:
@@ -462,7 +483,11 @@ def test_bare_control_command_wins_over_a_colliding_file(
             status=PlaybackStatus("Song", elapsed=0.0, duration=1.0),
         )
         if command == "status"
-        else ControlResponse(True)
+        else (
+            ControlResponse(True, queue=QueueSnapshot(("Song",), 1))
+            if command == "list"
+            else ControlResponse(True)
+        )
     )
     request = Mock(return_value=response)
     monkeypatch.setattr("cla.cli.send_command", request)
