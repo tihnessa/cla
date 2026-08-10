@@ -95,6 +95,7 @@ class PlaybackController:
         self.started_at = 0.0
         self.paused = False
         self.stopped = False
+        self.exhausted = False
         self.closed = False
         self.process: Optional[Any] = None
 
@@ -119,9 +120,11 @@ class PlaybackController:
         except OSError as error:
             self.process = None
             self.stopped = True
+            self.exhausted = False
             return ControlResponse(False, f"could not start ffplay: {error}")
         self.started_at = self.clock()
         self.stopped = False
+        self.exhausted = False
         return ControlResponse(True)
 
     def _terminate(self) -> None:
@@ -159,6 +162,7 @@ class PlaybackController:
             if returncode is not None:
                 self.process = None
                 self.stopped = True
+                self.exhausted = False
                 return ControlResponse(
                     False, f"ffplay exited with status {returncode} during startup"
                 )
@@ -178,6 +182,7 @@ class PlaybackController:
             _warning(self.current.path, f"ffplay exited with status {returncode}")
         if self.index == len(self.tracks) - 1:
             self.stopped = True
+            self.exhausted = returncode == 0
             return
         self.index += 1
         self.offset = 0.0
@@ -190,6 +195,7 @@ class PlaybackController:
         """Stop playback and close the session."""
         self._terminate()
         self.stopped = True
+        self.exhausted = False
         self.closed = True
 
     def append(
@@ -208,13 +214,15 @@ class PlaybackController:
         original_offset = self.offset
         original_paused = self.paused
         was_stopped = self.stopped
+        was_exhausted = self.exhausted
         self.tracks.extend(additions)
         if not was_stopped:
             return ControlResponse(True)
 
-        self.index = original_length
-        self.offset = 0.0
-        self.paused = False
+        if was_exhausted:
+            self.index = original_length
+            self.offset = 0.0
+            self.paused = False
         response = self._launch()
         if response.ok:
             response = self.confirm_started()
@@ -226,6 +234,7 @@ class PlaybackController:
         self.offset = original_offset
         self.paused = original_paused
         self.stopped = True
+        self.exhausted = was_exhausted
         return response
 
     def handle(self, command: str) -> ControlResponse:
@@ -291,6 +300,7 @@ class PlaybackController:
         if canonical == "ff" and crosses_boundary:
             if self.index == len(self.tracks) - 1:
                 self.stopped = True
+                self.exhausted = True
                 return ControlResponse(True)
             return self._select(self.index + 1)
         self.offset = new_offset

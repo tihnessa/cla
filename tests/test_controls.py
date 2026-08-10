@@ -379,6 +379,47 @@ def test_immediate_exit_when_reviving_finished_queue_rolls_back_append(
     assert player.stopped
 
 
+def test_append_after_launch_failure_retries_existing_queue_before_additions(
+    controller,
+) -> None:
+    player, _, processes = controller
+    processes[0][2].returncode = 0
+    player.popen = Mock(side_effect=[OSError("temporary failure"), FakeProcess()])
+
+    player.tick()
+
+    assert player.index == 1
+    assert player.stopped
+    response = player.append([Track(Path("new.mp3"), track=1, disc=1, duration=40.0)])
+
+    assert response.ok
+    assert player.index == 1
+    assert player.current.path == Path("track2.mp3")
+    assert not player.stopped
+    assert [track.path.name for track in player.tracks] == [
+        "track1.mp3",
+        "track2.mp3",
+        "new.mp3",
+    ]
+
+
+def test_append_after_failed_final_track_retries_it_before_additions(
+    controller,
+) -> None:
+    player, _, processes = controller
+    player.index = len(player.tracks) - 1
+    player.process = processes[-1][2]
+    player.process.returncode = 1
+    player.tick()
+
+    assert player.stopped
+    assert player.append([Track(Path("new.mp3"), track=1, disc=1)]).ok
+
+    assert player.index == 1
+    assert player.current.path == Path("track2.mp3")
+    assert processes[-1][0][-1] == "track2.mp3"
+
+
 def test_kill_terminates_playback_without_advancing_playlist(controller) -> None:
     player, _, processes = controller
     process = processes[0][2]
