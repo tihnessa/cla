@@ -26,6 +26,7 @@ from cla.session import (
     parse_seek_command,
     playback_launch_lock,
     read_session,
+    send_append,
     send_command,
 )
 
@@ -57,13 +58,23 @@ class FolderSources:
     playlists: list[Path]
 
 
+@dataclass(frozen=True)
+class ResolvedSource:
+    """Candidate files and ordering semantics resolved from one CLI path."""
+
+    files: list[Path]
+    input_order_authoritative: bool = False
+    kind: str = "playback"
+    single_audio: bool = False
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cla",
         description="Play local audio in the background or control active playback.",
         epilog=(
-            "controls: pause, play, skip/next, back/prev, ff[seconds], "
-            "rw[seconds], replay, restart, kill, status"
+            "queue: add <path>; controls: pause, play, skip/next, back/prev, "
+            "ff[seconds], rw[seconds], replay, restart, kill, status"
         ),
     )
     parser.add_argument(
@@ -71,6 +82,7 @@ def _parser() -> argparse.ArgumentParser:
         metavar="path|command",
         help="audio file, M3U playlist, folder path, or playback control command",
     )
+    parser.add_argument("path", nargs="?", help="source path for the add command")
     return parser
 
 
@@ -659,9 +671,126 @@ def _tools() -> tuple[Optional[str], Optional[str], Optional[str]]:
     return ffprobe, ffplay, None
 
 
+def _resolve_source(argument: str) -> tuple[Optional[ResolvedSource], Optional[str]]:
+    """Resolve a CLI source identically for replacement and append operations."""
+    target = Path(argument)
+    try:
+        resolved = target.expanduser().resolve()
+        is_file = resolved.is_file()
+        is_directory = resolved.is_dir()
+    except OSError:
+        return None, f"{target!s} is not a readable file or directory"
+
+    if is_file:
+        if resolved.suffix.casefold() == PLAYLIST_EXTENSION:
+            candidates, error = _playlist_candidates(resolved)
+            if error is not None:
+                return None, error
+            return ResolvedSource(candidates, True, "playlist"), None
+        audio_file = _readable_file(resolved)
+        if audio_file is None:
+            return None, f"{target!s} is not a readable file"
+        return ResolvedSource([audio_file], kind="playback", single_audio=True), None
+
+    if is_directory:
+        sources, error = _directory_sources(resolved)
+        if error is not None:
+            return None, error
+        candidates, authoritative, error = _select_folder_source(sources)
+        if error is not None:
+            return None, error
+        return ResolvedSource(candidates, authoritative, "folder"), None
+
+    return None, f"{target!s} is not a readable file or directory"
+
+
+def _source_manifest(source: ResolvedSource, ffprobe: str, ffplay: str) -> Path:
+    if source.input_order_authoritative:
+        return _write_manifest(
+            source.files,
+            ffprobe,
+            ffplay,
+            input_order_authoritative=True,
+        )
+    return _write_manifest(source.files, ffprobe, ffplay)
+
+
+def _validate_single_audio(source: ResolvedSource, ffprobe: str) -> Optional[str]:
+    if not source.single_audio:
+        return None
+    probe = _probe_audio(ffprobe, source.files[0])
+    if probe.error is not None:
+        return probe.error
+    if probe.duration is None:
+        return "could not determine audio duration"
+    return None
+
+
+def _coordination_error(source: ResolvedSource, error: Exception) -> str:
+    return f"could not coordinate {source.kind} launch: {error}"
+
+
+def _start_source_locked(
+    source: ResolvedSource, ffprobe: str, ffplay: str
+) -> Optional[str]:
+    manifest = _source_manifest(source, ffprobe, ffplay)
+    error = _start_worker(manifest)
+    if error is not None:
+        manifest.unlink(missing_ok=True)
+    return error
+
+
+def _add_source(argument: str) -> int:
+    source, error = _resolve_source(argument)
+    if error is not None:
+        return _error(error)
+    assert source is not None
+    ffprobe, ffplay, error = _tools()
+    if error is not None:
+        return _error(error)
+    assert ffprobe is not None and ffplay is not None
+
+    error = _validate_single_audio(source, ffprobe)
+    if error is not None:
+        return _error(error)
+
+    try:
+        with playback_launch_lock():
+            if read_session() is None:
+                error = _start_source_locked(source, ffprobe, ffplay)
+                return 0 if error is None else _error(error)
+
+            manifest = _source_manifest(source, ffprobe, ffplay)
+            try:
+                response = send_append(manifest, candidate_count=len(source.files))
+            finally:
+                manifest.unlink(missing_ok=True)
+
+            if response.unavailable:
+                error = _start_source_locked(source, ffprobe, ffplay)
+                return 0 if error is None else _error(error)
+    except (OSError, TypeError) as caught:
+        return _error(f"could not coordinate playlist addition: {caught}")
+
+    for warning in response.warnings:
+        print(f"cla: warning: {warning}", file=sys.stderr)
+    if not response.ok:
+        return _error(response.message or "could not append to playback queue")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Validate a file or folder and start background playback."""
-    argument = _parser().parse_args(argv).target
+    """Start, extend, or control background playback."""
+    parser = _parser()
+    arguments = parser.parse_args(argv)
+    if arguments.target == "add":
+        if arguments.path is None:
+            parser.error("add requires a path")
+        return _add_source(arguments.path)
+    if arguments.path is not None:
+        parser.error("only add accepts a second argument")
+
+    argument = arguments.target
     unqualified_seek = Path(argument).name == argument and is_seek_command(argument)
     if argument in CONTROL_COMMANDS or (
         unqualified_seek and parse_seek_command(argument) is not None
@@ -689,101 +818,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if unqualified_seek:
         return 0
 
-    target = Path(argument)
+    source, error = _resolve_source(argument)
+    if error is not None:
+        return _error(error)
+    assert source is not None
+    ffprobe, ffplay, error = _tools()
+    if error is not None:
+        return _error(error)
+    assert ffprobe is not None and ffplay is not None
+    error = _validate_single_audio(source, ffprobe)
+    if error is not None:
+        return _error(error)
+
     try:
-        resolved = target.expanduser().resolve()
-        is_file = resolved.is_file()
-        is_directory = resolved.is_dir()
-    except OSError:
-        return _error(f"{target!s} is not a readable file or directory")
-
-    if is_file:
-        if resolved.suffix.casefold() == PLAYLIST_EXTENSION:
-            candidates, playlist_error = _playlist_candidates(resolved)
-            if playlist_error is not None:
-                return _error(playlist_error)
-            ffprobe, ffplay, tool_error = _tools()
-            if tool_error is not None:
-                return _error(tool_error)
-            assert ffprobe is not None and ffplay is not None
-            try:
-                with playback_launch_lock():
-                    shutdown_error = _stop_existing_session()
-                    if shutdown_error is not None:
-                        return _error(shutdown_error)
-                    manifest = _write_manifest(
-                        candidates,
-                        ffprobe,
-                        ffplay,
-                        input_order_authoritative=True,
-                    )
-                    worker_error = _start_worker(manifest)
-            except (OSError, TypeError) as error:
-                return _error(f"could not coordinate playlist playback launch: {error}")
-            if worker_error is not None:
-                manifest.unlink(missing_ok=True)
-                return _error(worker_error)
-            return 0
-
-        audio_file = _readable_file(resolved)
-        if audio_file is None:
-            return _error(f"{target!s} is not a readable file")
-        ffprobe, ffplay, tool_error = _tools()
-        if tool_error is not None:
-            return _error(tool_error)
-        assert ffprobe is not None and ffplay is not None
-        probe = _probe_audio(ffprobe, audio_file)
-        if probe.error is not None:
-            return _error(probe.error)
-        if probe.duration is None:
-            return _error("could not determine audio duration")
-        try:
-            with playback_launch_lock():
-                shutdown_error = _stop_existing_session()
-                if shutdown_error is not None:
-                    return _error(shutdown_error)
-                manifest = _write_manifest([audio_file], ffprobe, ffplay)
-                worker_error = _start_worker(manifest)
-        except (OSError, TypeError) as error:
-            return _error(f"could not coordinate playback launch: {error}")
-        if worker_error is not None:
-            manifest.unlink(missing_ok=True)
-            return _error(worker_error)
-        return 0
-
-    if is_directory:
-        sources, directory_error = _directory_sources(resolved)
-        if directory_error is not None:
-            return _error(directory_error)
-        candidates, authoritative_order, selection_error = _select_folder_source(
-            sources
-        )
-        if selection_error is not None:
-            return _error(selection_error)
-        ffprobe, ffplay, tool_error = _tools()
-        if tool_error is not None:
-            return _error(tool_error)
-        assert ffprobe is not None and ffplay is not None
-        try:
-            with playback_launch_lock():
-                shutdown_error = _stop_existing_session()
-                if shutdown_error is not None:
-                    return _error(shutdown_error)
-                if authoritative_order:
-                    manifest = _write_manifest(
-                        candidates,
-                        ffprobe,
-                        ffplay,
-                        input_order_authoritative=True,
-                    )
-                else:
-                    manifest = _write_manifest(candidates, ffprobe, ffplay)
-                worker_error = _start_worker(manifest)
-        except (OSError, TypeError) as error:
-            return _error(f"could not coordinate folder playback launch: {error}")
-        if worker_error is not None:
-            manifest.unlink(missing_ok=True)
-            return _error(worker_error)
-        return 0
-
-    return _error(f"{target!s} is not a readable file or directory")
+        with playback_launch_lock():
+            error = _stop_existing_session()
+            if error is not None:
+                return _error(error)
+            error = _start_source_locked(source, ffprobe, ffplay)
+    except (OSError, TypeError) as caught:
+        return _error(_coordination_error(source, caught))
+    return 0 if error is None else _error(error)

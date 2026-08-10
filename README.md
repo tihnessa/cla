@@ -40,6 +40,14 @@ Play a local M3U playlist in its declared order:
 cla path/to/mix.m3u
 ```
 
+Append a file, folder, or M3U playlist to the active queue:
+
+```bash
+cla add path/to/audio.mp3
+cla add path/to/album
+cla add path/to/mix.m3u
+```
+
 Control the active playback session from any terminal:
 
 ```bash
@@ -73,6 +81,20 @@ active, `cla status` prints `Nothing in queue` and succeeds.
 Starting another file, playlist, or folder stops and replaces the current session.
 Concurrent launch requests are serialized through replacement and startup, so only
 the most recent ready worker remains active.
+`cla add` instead appends the resolved tracks after everything already queued and
+does not interrupt the current track. Additions use the same discovery, selection,
+ordering, validation, and warning rules as normal playback. M3U order remains
+authoritative, while a folder's newly added tracks are ordered as one batch without
+reordering tracks that were already queued. A clean successful addition produces no
+output.
+
+The playback session remains available after its final track ends. Adding playable
+material to that completed queue starts playback automatically from the first new
+track. If no session exists, `cla add` starts a new queue just like normal playback.
+Candidates are fully probed before the live queue is changed; cancellation or a
+batch containing no playable files leaves the existing queue untouched. Concurrent
+additions and replacement launches are serialized. `kill` still stops playback and
+discards the queue.
 Navigation never wraps or changes the established playlist order. `skip` on
 the final track and `back` on the first track leave playback unchanged and
 print a clear message. Navigation, `replay`, and `restart` start the selected
@@ -87,6 +109,9 @@ seconds. Invalid or zero values, such as `ff0`, `rw-5`, or `ffabc`, are ignored.
 `restart` and `replay` are equivalent for a single-file session. A control
 issued without an active session reports an error, except for `status`, which
 reports an empty queue as described above.
+
+The bare command name `add` is also reserved. To play a file or directory named
+`add`, qualify it as a path, such as `./add`.
 
 Bare control names are reserved: `pause`, `play`, `skip`, `next`, `back`,
 `prev`, `ff`, `rw`, `replay`, `restart`, `kill`, and `status` always address
@@ -179,4 +204,4 @@ uv run ruff format .
 - [ ] [#20: Accept spaced arguments for `ff` and `rw` commands](https://github.com/tihnessa/cla/issues/20)
 - [ ] [#19: Extend `cla skip` with absolute and relative track jumps](https://github.com/tihnessa/cla/issues/19)
 - [ ] [#18: Add `cla list` command to display the current playlist](https://github.com/tihnessa/cla/issues/18)
-- [ ] [#17: Add `cla add` command to append tracks to the current playlist](https://github.com/tihnessa/cla/issues/17)
+- [x] [#17: Add `cla add` command to append tracks to the current playlist](https://github.com/tihnessa/cla/issues/17)

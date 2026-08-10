@@ -47,6 +47,13 @@ class Track:
     title: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class AppendRequest:
+    """A request to validate and append candidates from a temporary manifest."""
+
+    manifest: Path
+
+
 def _warning(path: Optional[Path], message: str) -> None:
     subject = f"{path!s}: " if path is not None else ""
     print(f"cla: warning: {subject}{message}", file=sys.stderr, flush=True)
@@ -88,6 +95,7 @@ class PlaybackController:
         self.started_at = 0.0
         self.paused = False
         self.stopped = False
+        self.closed = False
         self.process: Optional[Any] = None
 
     @property
@@ -113,6 +121,7 @@ class PlaybackController:
             self.stopped = True
             return ControlResponse(False, f"could not start ffplay: {error}")
         self.started_at = self.clock()
+        self.stopped = False
         return ControlResponse(True)
 
     def _terminate(self) -> None:
@@ -181,6 +190,41 @@ class PlaybackController:
         """Stop playback and close the session."""
         self._terminate()
         self.stopped = True
+        self.closed = True
+
+    def append(
+        self,
+        tracks: Sequence[Track],
+        *,
+        input_order_authoritative: bool = False,
+    ) -> ControlResponse:
+        """Atomically append a validated batch, reviving completed playback."""
+        additions = list(tracks) if input_order_authoritative else _order_tracks(tracks)
+        if not additions:
+            return ControlResponse(False, "no playable audio files were found")
+
+        original_length = len(self.tracks)
+        original_index = self.index
+        original_offset = self.offset
+        original_paused = self.paused
+        was_stopped = self.stopped
+        self.tracks.extend(additions)
+        if not was_stopped:
+            return ControlResponse(True)
+
+        self.index = original_length
+        self.offset = 0.0
+        self.paused = False
+        response = self._launch()
+        if response.ok:
+            return response
+
+        del self.tracks[original_length:]
+        self.index = original_index
+        self.offset = original_offset
+        self.paused = original_paused
+        self.stopped = True
+        return response
 
     def handle(self, command: str) -> ControlResponse:
         """Apply one public playback command."""
@@ -328,7 +372,7 @@ def _publish_startup(path: Path, ok: bool, error: Optional[str] = None) -> None:
         raise
 
 
-def _read_request(connection: socket.socket, token: str) -> Optional[str]:
+def _read_request(connection: socket.socket, token: str) -> Optional[object]:
     data = bytearray()
     while len(data) <= MAX_MESSAGE_BYTES:
         chunk = connection.recv(min(1024, MAX_MESSAGE_BYTES + 1 - len(data)))
@@ -348,7 +392,69 @@ def _read_request(connection: socket.socket, token: str) -> Optional[str]:
     if not secrets.compare_digest(request["token"], token):
         return None
     command = request.get("command")
+    if command == "_append":
+        manifest = request.get("manifest")
+        if not isinstance(manifest, str) or not manifest:
+            return None
+        return AppendRequest(Path(manifest))
     return command if isinstance(command, str) else None
+
+
+def _probe_tracks(
+    files: Sequence[Path], ffprobe: str
+) -> tuple[list[Track], tuple[str, ...]]:
+    """Probe a complete candidate batch without mutating playback state."""
+    tracks = []
+    warnings = []
+    for audio_file in files:
+        try:
+            with audio_file.open("rb"):
+                pass
+        except OSError:
+            warnings.append(f"{audio_file!s}: file is not readable")
+            continue
+        result: ProbeResult = _probe_audio(ffprobe, audio_file)
+        if result.error is not None:
+            warnings.append(f"{audio_file!s}: {result.error}")
+            continue
+        if result.duration is None:
+            warnings.append(f"{audio_file!s}: could not determine audio duration")
+            continue
+        tracks.append(
+            Track(
+                audio_file,
+                track=result.track,
+                disc=result.disc,
+                duration=result.duration,
+                title=result.title,
+            )
+        )
+    return tracks, tuple(warnings)
+
+
+def _handle_append(
+    controller: PlaybackController, request: AppendRequest
+) -> ControlResponse:
+    """Validate an append manifest and mutate the queue only after validation."""
+    try:
+        files, ffprobe, _ffplay, authoritative = _read_manifest(request.manifest)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        return ControlResponse(False, f"could not read append manifest: {error}")
+    tracks, warnings = _probe_tracks(files, ffprobe)
+    if not tracks:
+        return ControlResponse(
+            False,
+            "no playable audio files were found",
+            warnings=warnings,
+        )
+    response = controller.append(tracks, input_order_authoritative=authoritative)
+    return ControlResponse(
+        response.ok,
+        response.message,
+        status=response.status,
+        unavailable=response.unavailable,
+        warnings=warnings,
+    )
 
 
 def _serve(
@@ -390,10 +496,8 @@ def _serve(
                     except OSError:
                         pass
                 return 1
-            while not controller.stopped:
+            while not controller.closed:
                 controller.tick()
-                if controller.stopped:
-                    break
                 try:
                     connection, _ = server.accept()
                 except socket.timeout:
@@ -407,6 +511,8 @@ def _serve(
                             response = ControlResponse(True)
                         elif command == "_ping":
                             response = ControlResponse(True)
+                        elif isinstance(command, AppendRequest):
+                            response = _handle_append(controller, command)
                         elif command is None:
                             response = ControlResponse(False, "invalid control request")
                         else:
@@ -437,30 +543,9 @@ def worker_main(argv: Optional[Sequence[str]] = None) -> int:
             pass
         return 1
 
-    tracks = []
-    for audio_file in files:
-        try:
-            with audio_file.open("rb"):
-                pass
-        except OSError:
-            _warning(audio_file, "file is not readable")
-            continue
-        result: ProbeResult = _probe_audio(ffprobe, audio_file)
-        if result.error is not None:
-            _warning(audio_file, result.error)
-            continue
-        if result.duration is None:
-            _warning(audio_file, "could not determine audio duration")
-            continue
-        tracks.append(
-            Track(
-                audio_file,
-                track=result.track,
-                disc=result.disc,
-                duration=result.duration,
-                title=result.title,
-            )
-        )
+    tracks, warnings = _probe_tracks(files, ffprobe)
+    for warning in warnings:
+        _warning(None, warning)
 
     if not tracks:
         message = "no playable audio files were found"

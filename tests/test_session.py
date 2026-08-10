@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from cla.cli import ProbeResult, _write_manifest
 from cla.session import (
     ControlResponse,
     PlaybackStatus,
@@ -20,9 +21,10 @@ from cla.session import (
     playback_launch_lock,
     publish_session,
     read_session,
+    send_append,
     send_command,
 )
-from cla.worker import PlaybackController, Track, _serve
+from cla.worker import AppendRequest, PlaybackController, Track, _handle_append, _serve
 
 
 @pytest.fixture
@@ -424,7 +426,9 @@ def test_worker_serves_controls_over_loopback_and_cleans_up(
     )
     worker.start()
     deadline = time.monotonic() + 2
-    while read_session() is None and time.monotonic() < deadline:
+    while (
+        read_session() is None or not startup_status.exists()
+    ) and time.monotonic() < deadline:
         time.sleep(0.01)
 
     startup = json.loads(startup_status.read_text(encoding="utf-8"))
@@ -475,6 +479,130 @@ def test_kill_stops_worker_and_cleans_up_session(
     assert controller.index == 0
     process.terminate.assert_called_once_with()
     assert not session_file.exists()
+
+
+def test_finished_worker_accepts_an_atomic_append(
+    session_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Process:
+        def __init__(self):
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    processes = []
+
+    def popen(*args, **kwargs):
+        process = Process()
+        processes.append(process)
+        return process
+
+    controller = PlaybackController(
+        "/tools/ffplay",
+        [Track(Path("one.mp3"), track=1, disc=1, duration=1.0)],
+        popen=popen,
+    )
+    worker = threading.Thread(target=lambda: _serve(controller))
+    worker.start()
+    deadline = time.monotonic() + 2
+    while read_session() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    processes[0].returncode = 0
+    deadline = time.monotonic() + 2
+    while not controller.stopped and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert read_session() is not None
+
+    added = tmp_path / "added.mp3"
+    added.touch()
+    manifest = _write_manifest([added], "/tools/ffprobe", "/tools/ffplay")
+    monkeypatch.setattr(
+        "cla.worker._probe_audio",
+        Mock(return_value=ProbeResult(track=1, duration=2.0)),
+    )
+
+    response = send_append(manifest, candidate_count=1)
+
+    assert response.ok
+    assert not manifest.exists()
+    assert controller.current.path == added
+    assert not controller.stopped
+    assert len(processes) == 2
+    assert send_command("_shutdown").ok
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+
+
+def test_unplayable_append_leaves_queue_unchanged(
+    session_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = Mock(returncode=None)
+    process.poll.side_effect = lambda: process.returncode
+    process.terminate.side_effect = lambda: setattr(process, "returncode", -15)
+    process.wait.side_effect = lambda timeout=None: process.returncode
+    controller = PlaybackController(
+        "/tools/ffplay",
+        [Track(Path("one.mp3"), track=1, disc=1, duration=60.0)],
+        popen=Mock(return_value=process),
+    )
+    worker = threading.Thread(target=lambda: _serve(controller))
+    worker.start()
+    deadline = time.monotonic() + 2
+    while read_session() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    bad = tmp_path / "bad.mp3"
+    bad.touch()
+    manifest = _write_manifest([bad], "/tools/ffprobe", "/tools/ffplay")
+    monkeypatch.setattr(
+        "cla.worker._probe_audio", Mock(return_value=ProbeResult(error="invalid"))
+    )
+
+    response = send_append(manifest, candidate_count=1)
+
+    assert not response.ok
+    assert "no playable" in (response.message or "")
+    assert response.warnings == (f"{bad}: invalid",)
+    assert controller.tracks == [Track(Path("one.mp3"), track=1, disc=1, duration=60.0)]
+    assert send_command("_shutdown").ok
+    worker.join(timeout=2)
+
+
+def test_append_probes_the_whole_batch_before_mutating_and_keeps_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = Track(Path("one.mp3"), track=1, disc=1, duration=60.0)
+    controller = PlaybackController("/tools/ffplay", [original], popen=Mock())
+    bad = tmp_path / "bad.mp3"
+    good = tmp_path / "good.mp3"
+    bad.touch()
+    good.touch()
+    manifest = _write_manifest([bad, good], "/tools/ffprobe", "/tools/ffplay")
+
+    def probe(_ffprobe: str, path: Path) -> ProbeResult:
+        assert controller.tracks == [original]
+        if path == bad:
+            return ProbeResult(error="invalid")
+        return ProbeResult(track=2, duration=30.0)
+
+    monkeypatch.setattr("cla.worker._probe_audio", probe)
+
+    response = _handle_append(controller, AppendRequest(manifest))
+
+    assert response.ok
+    assert response.warnings == (f"{bad}: invalid",)
+    assert [track.path for track in controller.tracks] == [original.path, good]
 
 
 def test_ffplay_start_failure_is_published_to_parent(
