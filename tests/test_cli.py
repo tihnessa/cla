@@ -119,7 +119,7 @@ def test_removed_rew_token_can_address_a_real_file(
     request.assert_not_called()
 
 
-@pytest.mark.parametrize("reserved_name", ["kill", "status"])
+@pytest.mark.parametrize("reserved_name", ["kill", "status", "list"])
 def test_qualified_reserved_name_remains_a_filesystem_target(
     reserved_name: str,
     tmp_path: Path,

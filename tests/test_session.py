@@ -14,6 +14,7 @@ from cla.cli import ProbeResult, _write_manifest
 from cla.session import (
     ControlResponse,
     PlaybackStatus,
+    QueueSnapshot,
     _acquire_windows_lock,
     _session_path,
     clear_session,
@@ -342,6 +343,85 @@ def test_status_response_round_trip(
         True,
         status=PlaybackStatus("Song", elapsed=12.5, duration=90.0),
     )
+
+
+def test_queue_response_round_trip(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_session(43210, "secret")
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.recv.return_value = encode_response(
+        ControlResponse(
+            True,
+            queue=QueueSnapshot(("First", "second.mp3"), current_index=2),
+        )
+    )
+    monkeypatch.setattr(
+        "cla.session.socket.create_connection", Mock(return_value=connection)
+    )
+
+    assert send_command("list") == ControlResponse(
+        True,
+        queue=QueueSnapshot(("First", "second.mp3"), current_index=2),
+    )
+
+
+def test_queue_response_can_exceed_the_old_fixed_response_limit(
+    session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_session(43210, "secret")
+    labels = tuple(f"track-{index:06d}.mp3" for index in range(70_000))
+    encoded = encode_response(
+        ControlResponse(True, queue=QueueSnapshot(labels, current_index=35_001))
+    )
+    assert len(encoded) > 1024 * 1024
+    chunks = [
+        encoded[start : start + 64 * 1024]
+        for start in range(0, len(encoded), 64 * 1024)
+    ]
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.recv.side_effect = chunks
+    monkeypatch.setattr(
+        "cla.session.socket.create_connection", Mock(return_value=connection)
+    )
+
+    response = send_command("list")
+
+    assert response.queue == QueueSnapshot(labels, current_index=35_001)
+
+
+@pytest.mark.parametrize(
+    "queue",
+    [
+        {"labels": [], "current_index": 1},
+        {"labels": ["one"], "current_index": 0},
+        {"labels": ["one"], "current_index": 2},
+        {"labels": [""], "current_index": 1},
+        {"labels": ["one"], "current_index": True},
+    ],
+)
+def test_malformed_queue_response_is_a_protocol_error(
+    queue: object, session_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_session(43210, "secret")
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.recv.return_value = (
+        json.dumps({"ok": True, "message": None, "queue": queue}).encode() + b"\n"
+    )
+    monkeypatch.setattr(
+        "cla.session.socket.create_connection", Mock(return_value=connection)
+    )
+
+    response = send_command("list")
+
+    assert not response.ok
+    assert response.message == "invalid control response"
 
 
 def test_malformed_status_response_is_a_protocol_error(

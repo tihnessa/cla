@@ -63,6 +63,7 @@ cla replay      # restart the current track
 cla restart     # restart the playlist from its first track
 cla kill        # stop playback and discard the playlist
 cla status      # show the current track and playback position
+cla list        # show the complete queue in playback order
 ```
 
 `cla status` prints the embedded track title and its elapsed and total time:
@@ -77,6 +78,22 @@ and absolute paths are never included. Times use zero-padded minutes and
 seconds, with minutes continuing past 59 for longer tracks. While playback is
 paused, the displayed elapsed time remains frozen. If no playback queue is
 active, `cla status` prints `Nothing in queue` and succeeds.
+
+`cla list` prints every queued track with a stable one-based index. The current
+track is marked with `>`, separately from its index:
+
+```text
+1.   Opening track
+2. > Current track
+3.   closing-track.mp3
+```
+
+The labels follow the same title and filename rules as `cla status`. A queue
+that fits within the terminal is printed directly. Longer queues reserve the
+last visible row for a prompt: press Enter to reveal one more entry, Space to
+advance one page, or `q` to stop. Terminal-height detection falls back to 20
+rows. End-of-input or unavailable interactive input stops paging cleanly. Like
+`status`, `list` prints `Nothing in queue` and succeeds when no queue is active.
 
 Starting another file, playlist, or folder stops and replaces the current session.
 Concurrent launch requests are serialized through replacement and startup, so only
@@ -107,18 +124,19 @@ track stops playback. Append a positive whole number of seconds directly to
 `ff` or `rw` to choose the seek distance; without a number, the distance is 10
 seconds. Invalid or zero values, such as `ff0`, `rw-5`, or `ffabc`, are ignored.
 `restart` and `replay` are equivalent for a single-file session. A control
-issued without an active session reports an error, except for `status`, which
-reports an empty queue as described above.
+issued without an active session reports an error, except for `status` and
+`list`, which report an empty queue as described above.
 
 The bare command name `add` is also reserved. To play a file or directory named
 `add`, qualify it as a path, such as `./add`.
 
 Bare control names are reserved: `pause`, `play`, `skip`, `next`, `back`,
 `prev`, `ff`, `rw`, `replay`, `restart`, `kill`, and `status` always address
-the active playback session. Unqualified names beginning with `ff` or `rw` are
-also reserved for custom or invalid seek controls. To play a file or directory
-with one of those names, qualify it as a path, such as `./next`, `./ff20`,
-`../next`, `album/next`, or an absolute path.
+the active playback session. `list` is reserved in the same way. Unqualified
+names beginning with `ff` or `rw` are also reserved for custom or invalid seek
+controls. To play a file or directory with one of those names, qualify it as a
+path, such as `./next`, `./list`, `./ff20`, `../next`, `album/next`, or an
+absolute path.
 
 Folder playback is non-recursive. It considers regular files with these
 case-insensitive extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.aac`, and
@@ -147,11 +165,12 @@ entries. If no playable entries remain, `cla` reports an error and does not
 publish a new playback session.
 
 The command produces no output when playback or a mutating control succeeds,
-except for first/last-track boundary messages. The `status` query produces the
-output described above. `cla` validates files with `ffprobe`, launches audio-only
-`ffplay` through a detached coordinator, and returns after playback has started
-and its control session is ready. Folder tracks play sequentially. Playback and
-later controls do not require the originating terminal to remain open.
+except for first/last-track boundary messages. The `status` and `list` queries
+produce the output described above. `cla` validates files with `ffprobe`, launches
+audio-only `ffplay` through a detached coordinator, and returns after playback has
+started and its control session is ready. Folder tracks play sequentially.
+Playback and later controls do not require the originating terminal to remain
+open.
 
 Supported formats depend on the installed FFmpeg build. Typical builds support
 WAV, MP3, FLAC, OGG/Vorbis, and AAC/M4A. URLs are not supported.
@@ -203,5 +222,5 @@ uv run ruff format .
 
 - [ ] [#20: Accept spaced arguments for `ff` and `rw` commands](https://github.com/tihnessa/cla/issues/20)
 - [ ] [#19: Extend `cla skip` with absolute and relative track jumps](https://github.com/tihnessa/cla/issues/19)
-- [ ] [#18: Add `cla list` command to display the current playlist](https://github.com/tihnessa/cla/issues/18)
+- [x] [#18: Add `cla list` command to display the current playlist](https://github.com/tihnessa/cla/issues/18)
 - [x] [#17: Add `cla add` command to append tracks to the current playlist](https://github.com/tihnessa/cla/issues/17)
