@@ -10,6 +10,7 @@ from cla.cli import (
     _write_manifest,
     main,
 )
+from cla.session import ControlResponse, SessionDescriptor
 from cla.worker import PlaybackController, Track, _read_manifest, worker_main
 
 
@@ -128,6 +129,37 @@ def test_direct_playlist_starts_worker_with_authoritative_order(
     assert write_manifest.call_args.kwargs == {"input_order_authoritative": True}
 
 
+def test_direct_playlist_add_preserves_authoritative_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "track10.mp3"
+    second = tmp_path / "track2.mp3"
+    first.touch()
+    second.touch()
+    playlist = tmp_path / "mix.M3U"
+    playlist.write_text("track10.mp3\ntrack2.mp3\n", encoding="utf-8")
+    manifest = tmp_path / "append.json"
+    _install_tools(monkeypatch)
+    monkeypatch.setattr(
+        "cla.cli.read_session",
+        Mock(return_value=SessionDescriptor(43210, "secret", 1234)),
+    )
+    write_manifest = Mock(return_value=manifest)
+    append = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli._write_manifest", write_manifest)
+    monkeypatch.setattr("cla.cli.send_append", append)
+
+    assert main(["add", str(playlist)]) == 0
+
+    assert write_manifest.call_args.args == (
+        [first.resolve(), second.resolve()],
+        "/tools/ffprobe",
+        "/tools/ffplay",
+    )
+    assert write_manifest.call_args.kwargs == {"input_order_authoritative": True}
+    append.assert_called_once_with(manifest, candidate_count=2)
+
+
 @pytest.mark.parametrize(
     ("audio_names", "playlist_names", "answers", "selected"),
     [
@@ -188,6 +220,26 @@ def test_invalid_or_cancelled_selection_does_not_replace_active_session(
 
     stop.assert_not_called()
     assert "selection" in capsys.readouterr().err
+
+
+def test_cancelled_add_does_not_contact_or_replace_active_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "a.m3u").touch()
+    (tmp_path / "b.m3u").touch()
+    monkeypatch.setattr("builtins.input", Mock(return_value="q"))
+    append = Mock()
+    stop = Mock()
+    monkeypatch.setattr("cla.cli.send_append", append)
+    monkeypatch.setattr("cla.cli._stop_existing_session", stop)
+
+    assert main(["add", str(tmp_path)]) == 1
+
+    append.assert_not_called()
+    stop.assert_not_called()
+    assert "selection cancelled" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("failure", [EOFError, KeyboardInterrupt])

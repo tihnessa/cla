@@ -455,3 +455,139 @@ def test_probe_rejects_malformed_json(
     result = _probe_audio("/tools/ffprobe", path)
 
     assert result.error == "FFprobe returned invalid metadata"
+
+
+def test_add_requires_a_path(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["add"])
+
+    assert error.value.code == 2
+    assert "path" in capsys.readouterr().err
+
+
+def test_add_sends_resolved_file_to_active_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "song.mp3"
+    path.touch()
+    manifest = tmp_path / "append.json"
+    descriptor = SessionDescriptor(43210, "secret", 1234)
+    _install_tools(monkeypatch)
+    monkeypatch.setattr(
+        "cla.cli._probe_audio", Mock(return_value=ProbeResult(duration=42.5))
+    )
+    monkeypatch.setattr("cla.cli.read_session", Mock(return_value=descriptor))
+    write_manifest = Mock(return_value=manifest)
+    append = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli._write_manifest", write_manifest)
+    monkeypatch.setattr("cla.cli.send_append", append)
+    start = Mock()
+    monkeypatch.setattr("cla.cli._start_worker", start)
+
+    assert main(["add", str(path)]) == 0
+
+    write_manifest.assert_called_once_with(
+        [path.resolve()], "/tools/ffprobe", "/tools/ffplay"
+    )
+    append.assert_called_once_with(manifest, candidate_count=1)
+    start.assert_not_called()
+    assert capsys.readouterr() == ("", "")
+
+
+def test_add_reports_worker_warnings_and_failure_without_starting_a_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "bad.mp3"
+    path.touch()
+    manifest = tmp_path / "append.json"
+    _install_tools(monkeypatch)
+    monkeypatch.setattr(
+        "cla.cli._probe_audio", Mock(return_value=ProbeResult(duration=42.5))
+    )
+    monkeypatch.setattr(
+        "cla.cli.read_session",
+        Mock(return_value=SessionDescriptor(43210, "secret", 1234)),
+    )
+    monkeypatch.setattr("cla.cli._write_manifest", Mock(return_value=manifest))
+    monkeypatch.setattr(
+        "cla.cli.send_append",
+        Mock(
+            return_value=ControlResponse(
+                False,
+                "no playable audio files were found",
+                warnings=(f"{path}: invalid",),
+            )
+        ),
+    )
+    start = Mock()
+    monkeypatch.setattr("cla.cli._start_worker", start)
+
+    assert main(["add", str(path)]) == 1
+
+    stderr = capsys.readouterr().err
+    assert f"cla: warning: {path}: invalid" in stderr
+    assert "no playable audio files were found" in stderr
+    start.assert_not_called()
+
+
+def test_invalid_single_file_add_does_not_contact_active_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "bad.mp3"
+    path.touch()
+    _install_tools(monkeypatch)
+    monkeypatch.setattr(
+        "cla.cli._probe_audio", Mock(return_value=ProbeResult(error="invalid"))
+    )
+    append = Mock()
+    monkeypatch.setattr("cla.cli.send_append", append)
+
+    assert main(["add", str(path)]) == 1
+
+    assert "invalid" in capsys.readouterr().err
+    append.assert_not_called()
+
+
+def test_add_without_a_session_starts_normal_playback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "song.mp3"
+    path.touch()
+    manifest = tmp_path / "launch.json"
+    _install_tools(monkeypatch)
+    monkeypatch.setattr("cla.cli.read_session", Mock(return_value=None))
+    monkeypatch.setattr(
+        "cla.cli.subprocess.run", Mock(return_value=_successful_probe())
+    )
+    write_manifest = Mock(return_value=manifest)
+    start = Mock(return_value=None)
+    monkeypatch.setattr("cla.cli._write_manifest", write_manifest)
+    monkeypatch.setattr("cla.cli._start_worker", start)
+    append = Mock()
+    monkeypatch.setattr("cla.cli.send_append", append)
+
+    assert main(["add", str(path)]) == 0
+
+    start.assert_called_once_with(manifest)
+    append.assert_not_called()
+
+
+def test_qualified_add_name_remains_a_filesystem_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "add").touch()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "cla.cli._tools", Mock(return_value=(None, None, "filesystem target"))
+    )
+
+    assert main(["./add"]) == 1
+    assert "filesystem target" in capsys.readouterr().err

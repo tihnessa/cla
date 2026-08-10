@@ -288,6 +288,138 @@ def test_natural_completion_advances_but_intentional_stop_does_not(controller) -
     assert player.index == 1
 
 
+def test_append_extends_the_queue_without_interrupting_playback(controller) -> None:
+    player, _, processes = controller
+    current_process = player.process
+
+    response = player.append(
+        [Track(Path("track10.mp3"), track=10, disc=1, duration=40.0)]
+    )
+
+    assert response == ControlResponse(True)
+    assert player.process is current_process
+    assert [track.path.name for track in player.tracks] == [
+        "track1.mp3",
+        "track2.mp3",
+        "track10.mp3",
+    ]
+    assert len(processes) == 1
+
+
+def test_append_orders_only_the_new_batch(controller) -> None:
+    player, _, _ = controller
+
+    assert player.append(
+        [
+            Track(Path("added10.mp3"), track=None, disc=None, duration=40.0),
+            Track(Path("added2.mp3"), track=None, disc=None, duration=40.0),
+        ]
+    ).ok
+
+    assert [track.path.name for track in player.tracks] == [
+        "track1.mp3",
+        "track2.mp3",
+        "added2.mp3",
+        "added10.mp3",
+    ]
+
+
+def test_append_after_natural_completion_starts_first_added_track(controller) -> None:
+    player, _, processes = controller
+    player.index = len(player.tracks) - 1
+    player.process = processes[-1][2]
+    player.process.returncode = 0
+    player.tick()
+
+    assert player.stopped
+    assert player.append([Track(Path("new.mp3"), track=1, disc=1, duration=40.0)]).ok
+
+    assert not player.stopped
+    assert player.index == 2
+    assert processes[-1][0][-1] == "new.mp3"
+
+
+def test_failed_restart_of_finished_queue_rolls_back_append(controller) -> None:
+    player, _, processes = controller
+    player.index = len(player.tracks) - 1
+    player.process = processes[-1][2]
+    player.process.returncode = 0
+    player.tick()
+    original_tracks = list(player.tracks)
+    player.popen = Mock(side_effect=OSError("cannot execute"))
+
+    response = player.append([Track(Path("new.mp3"), track=1, disc=1, duration=40.0)])
+
+    assert not response.ok
+    assert player.tracks == original_tracks
+    assert player.index == 1
+    assert player.stopped
+
+
+def test_immediate_exit_when_reviving_finished_queue_rolls_back_append(
+    controller,
+) -> None:
+    player, _, processes = controller
+    player.index = len(player.tracks) - 1
+    player.process = processes[-1][2]
+    player.process.returncode = 0
+    player.tick()
+    original_tracks = list(player.tracks)
+    immediate_exit = FakeProcess()
+    immediate_exit.returncode = 1
+    player.popen = Mock(return_value=immediate_exit)
+
+    response = player.append([Track(Path("new.mp3"), track=1, disc=1, duration=40.0)])
+
+    assert not response.ok
+    assert response.message == "ffplay exited with status 1 during startup"
+    assert player.tracks == original_tracks
+    assert player.index == 1
+    assert player.process is None
+    assert player.stopped
+
+
+def test_append_after_launch_failure_retries_existing_queue_before_additions(
+    controller,
+) -> None:
+    player, _, processes = controller
+    processes[0][2].returncode = 0
+    player.popen = Mock(side_effect=[OSError("temporary failure"), FakeProcess()])
+
+    player.tick()
+
+    assert player.index == 1
+    assert player.stopped
+    response = player.append([Track(Path("new.mp3"), track=1, disc=1, duration=40.0)])
+
+    assert response.ok
+    assert player.index == 1
+    assert player.current.path == Path("track2.mp3")
+    assert not player.stopped
+    assert [track.path.name for track in player.tracks] == [
+        "track1.mp3",
+        "track2.mp3",
+        "new.mp3",
+    ]
+
+
+def test_append_after_failed_final_track_retries_it_before_additions(
+    controller,
+) -> None:
+    player, _, processes = controller
+    player.index = len(player.tracks) - 1
+    player.process = processes[-1][2]
+    player.process.returncode = 1
+    player.tick()
+
+    assert player.stopped
+    assert player.append([Track(Path("new.mp3"), track=1, disc=1)]).ok
+
+    assert player.index == 1
+    assert player.current.path == Path("track2.mp3")
+    assert processes[-1][0][-1] == "track2.mp3"
+
+
 def test_kill_terminates_playback_without_advancing_playlist(controller) -> None:
     player, _, processes = controller
     process = processes[0][2]

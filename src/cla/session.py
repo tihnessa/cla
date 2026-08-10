@@ -19,9 +19,11 @@ from typing import Optional
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 4096
+MAX_RESPONSE_BYTES = 1024 * 1024
 # A controller operation may spend two seconds waiting for FFplay to terminate,
 # then another two seconds waiting after a forced kill.
 CONTROL_TIMEOUT_SECONDS = 5.0
+APPEND_PROBE_TIMEOUT_SECONDS = 10.0
 WINDOWS_LOCK_RETRY_SECONDS = 0.05
 COMMAND_ALIASES = {
     "kill": "kill",
@@ -86,6 +88,7 @@ class ControlResponse:
     message: Optional[str] = None
     status: Optional[PlaybackStatus] = None
     unavailable: bool = False
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -360,35 +363,49 @@ def clear_session(token: Optional[str] = None) -> None:
         path.unlink(missing_ok=True)
 
 
-def _receive_line(connection: socket.socket) -> bytes:
+def _receive_line(
+    connection: socket.socket, max_bytes: int = MAX_RESPONSE_BYTES
+) -> bytes:
     data = bytearray()
-    while len(data) <= MAX_MESSAGE_BYTES:
-        chunk = connection.recv(min(1024, MAX_MESSAGE_BYTES + 1 - len(data)))
+    while len(data) <= max_bytes:
+        chunk = connection.recv(min(1024, max_bytes + 1 - len(data)))
         if not chunk:
             break
         data.extend(chunk)
         if b"\n" in chunk:
             break
-    if len(data) > MAX_MESSAGE_BYTES or b"\n" not in data:
+    if len(data) > max_bytes or b"\n" not in data:
         raise ValueError("invalid control response")
     return bytes(data).split(b"\n", 1)[0]
 
 
 def send_command(command: str) -> ControlResponse:
     """Send a command to the current worker, cleaning stale state on failure."""
+    return _send_request({"command": command}, CONTROL_TIMEOUT_SECONDS)
+
+
+def send_append(manifest: Path, *, candidate_count: int) -> ControlResponse:
+    """Ask the current worker to validate and atomically append a manifest."""
+    timeout = candidate_count * APPEND_PROBE_TIMEOUT_SECONDS + CONTROL_TIMEOUT_SECONDS
+    return _send_request({"command": "_append", "manifest": str(manifest)}, timeout)
+
+
+def _send_request(
+    request_data: Mapping[str, object], timeout: float
+) -> ControlResponse:
+    """Send one authenticated request and decode its response."""
     descriptor = read_session()
     if descriptor is None:
         clear_session()
         return ControlResponse(False, "no active playback session", unavailable=True)
-    request = (
-        json.dumps(
-            {"token": descriptor.token, "command": command}, separators=(",", ":")
-        ).encode("utf-8")
-        + b"\n"
-    )
+    request = dict(request_data)
+    request["token"] = descriptor.token
+    encoded_request = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(encoded_request) > MAX_MESSAGE_BYTES:
+        return ControlResponse(False, "playback request is too large")
     try:
         connection = socket.create_connection(
-            ("127.0.0.1", descriptor.port), timeout=CONTROL_TIMEOUT_SECONDS
+            ("127.0.0.1", descriptor.port), timeout=timeout
         )
     except ConnectionRefusedError:
         current = read_session()
@@ -404,8 +421,8 @@ def send_command(command: str) -> ControlResponse:
 
     try:
         with connection:
-            connection.settimeout(CONTROL_TIMEOUT_SECONDS)
-            connection.sendall(request)
+            connection.settimeout(timeout)
+            connection.sendall(encoded_request)
             response_data = json.loads(_receive_line(connection).decode("utf-8"))
         if not isinstance(response_data, dict) or not isinstance(
             response_data.get("ok"), bool
@@ -415,6 +432,11 @@ def send_command(command: str) -> ControlResponse:
         if message is not None and not isinstance(message, str):
             raise ValueError("invalid control response")
         status_data = response_data.get("status")
+        warnings_data = response_data.get("warnings", [])
+        if not isinstance(warnings_data, list) or not all(
+            isinstance(warning, str) for warning in warnings_data
+        ):
+            raise ValueError("invalid control response")
         status = None
         if status_data is not None:
             if not isinstance(status_data, Mapping):
@@ -442,7 +464,12 @@ def send_command(command: str) -> ControlResponse:
             ):
                 raise ValueError("invalid control response")
             status = PlaybackStatus(title, elapsed_value, duration_value)
-        return ControlResponse(response_data["ok"], message, status=status)
+        return ControlResponse(
+            response_data["ok"],
+            message,
+            status=status,
+            warnings=tuple(warnings_data),
+        )
     except socket.timeout:
         return ControlResponse(
             False, "playback control timed out; session may still be active"
@@ -473,6 +500,7 @@ def encode_response(response: ControlResponse) -> bytes:
                     if status is not None
                     else None
                 ),
+                "warnings": list(response.warnings),
             },
             separators=(",", ":"),
         ).encode("utf-8")
