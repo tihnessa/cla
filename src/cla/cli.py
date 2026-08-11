@@ -40,6 +40,7 @@ STARTUP_POLL_INTERVAL_SECONDS = 0.01
 WORKER_STOP_TIMEOUT_SECONDS = 2.0
 AUDIO_EXTENSIONS = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"})
 PLAYLIST_EXTENSION = ".m3u"
+ARGUMENT_CONTROL_COMMANDS = frozenset({"ff", "rw", "skip"})
 
 
 @dataclass(frozen=True)
@@ -75,10 +76,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cla",
         description="Play local audio in the background or control active playback.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "queue: add <path>; controls: pause, play, "
-            "skip[index|+/-offset]/next, back/prev, ff[seconds], rw[seconds], "
-            "replay, restart, kill, status, list"
+            "queue: add <path>\n"
+            "controls: pause, play, next, back/prev, replay, restart, kill, "
+            "status, list\n"
+            "arguments: skip[index|+/-offset] or skip [index|+/-offset]; "
+            "ff[seconds] or ff [seconds]; rw[seconds] or rw [seconds]"
         ),
     )
     parser.add_argument(
@@ -866,16 +870,24 @@ def _add_source(argument: str) -> int:
     return 0
 
 
+def _normalize_control_argv(argv: Sequence[str]) -> Sequence[str]:
+    """Join spaced control values before argparse interprets option-like text."""
+    if len(argv) == 2 and argv[0] in ARGUMENT_CONTROL_COMMANDS:
+        return (f"{argv[0]}{argv[1]}",)
+    return argv
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Start, extend, or control background playback."""
     parser = _parser()
-    arguments = parser.parse_args(argv)
+    raw_argv = sys.argv[1:] if argv is None else argv
+    arguments = parser.parse_args(_normalize_control_argv(raw_argv))
     if arguments.target == "add":
         if arguments.path is None:
             parser.error("add requires a path")
         return _add_source(arguments.path)
     if arguments.path is not None:
-        parser.error("only add accepts a second argument")
+        parser.error("only add, ff, rw, and skip accept a second argument")
 
     argument = arguments.target
     unqualified_seek = Path(argument).name == argument and is_seek_command(argument)

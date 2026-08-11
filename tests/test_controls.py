@@ -336,6 +336,28 @@ def test_custom_seek_uses_requested_positive_whole_seconds(controller) -> None:
     assert len(processes) == 1
 
 
+@pytest.mark.parametrize(
+    ("direction", "seconds", "expected_offset"),
+    [("rw", "7", 5), ("ff", "7", 19)],
+)
+def test_spaced_seek_uses_compact_controller_behavior(
+    direction: str,
+    seconds: str,
+    expected_offset: int,
+    controller,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    player, now, processes = controller
+    now[0] += 12
+    player.handle("pause")
+    monkeypatch.setattr("cla.cli.send_command", player.handle)
+
+    assert main([direction, seconds]) == 0
+    assert player.offset == expected_offset
+    assert player.paused
+    assert len(processes) == 1
+
+
 @pytest.mark.parametrize("command", ["ff0", "rw-5", "ffabc", "rw1.5"])
 def test_invalid_custom_seek_is_a_no_op(command: str, controller) -> None:
     player, now, processes = controller
@@ -655,6 +677,110 @@ def test_custom_seek_command_wins_over_a_colliding_file(
     request.assert_called_once_with(command)
 
 
+@pytest.mark.parametrize(
+    ("compact", "spaced"),
+    [
+        ("ff30", ["ff", "30"]),
+        ("rw30", ["rw", "30"]),
+        ("skip12", ["skip", "12"]),
+        ("skip+3", ["skip", "+3"]),
+        ("skip-2", ["skip", "-2"]),
+    ],
+)
+def test_compact_and_spaced_controls_send_the_same_normalized_command(
+    compact: str,
+    spaced: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli.send_command", request)
+
+    assert main([compact]) == 0
+    request.assert_called_once_with(compact)
+
+    request.reset_mock()
+    assert main(spaced) == 0
+    request.assert_called_once_with(compact)
+
+
+@pytest.mark.parametrize(("value", "expected_index"), [("3", 2), ("+3", 3)])
+def test_spaced_skip_uses_compact_controller_behavior(
+    value: str,
+    expected_index: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    player, _ = _jump_controller()
+    monkeypatch.setattr("cla.cli.send_command", player.handle)
+
+    assert main(["skip", value]) == 0
+    assert player.index == expected_index
+
+
+@pytest.mark.parametrize(
+    ("target", "value"),
+    [
+        ("ff", "0"),
+        ("rw", "-5"),
+        ("ff", "abc"),
+        ("rw", "1.5"),
+        ("ff", "１２"),
+        ("ff", "--2"),
+        ("skip", "0"),
+        ("skip", "+0"),
+        ("skip", "-0"),
+        ("skip", "+"),
+        ("skip", "--2"),
+        ("skip", "abc"),
+        ("skip", "9" * 5000),
+    ],
+)
+def test_invalid_spaced_control_is_ignored_before_filesystem_handling(
+    target: str,
+    value: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if len(value) < 100:
+        (tmp_path / value).touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock()
+    tools = Mock(side_effect=AssertionError("filesystem handling was reached"))
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr("cla.cli._tools", tools)
+
+    assert main([target, value]) == 0
+    request.assert_not_called()
+    tools.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("target", "value", "normalized"),
+    [
+        ("ff", "20", "ff20"),
+        ("rw", "30", "rw30"),
+        ("skip", "2", "skip2"),
+        ("skip", "+3", "skip+3"),
+        ("skip", "-1", "skip-1"),
+    ],
+)
+def test_spaced_control_wins_over_colliding_files(
+    target: str,
+    value: str,
+    normalized: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / target).touch()
+    (tmp_path / value).touch()
+    (tmp_path / normalized).touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli.send_command", request)
+
+    assert main([target, value]) == 0
+    request.assert_called_once_with(normalized)
+
+
 @pytest.mark.parametrize("command", ["skip2", "skip+3", "skip-1"])
 def test_valid_joined_skip_command_wins_over_a_colliding_file(
     command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -805,14 +931,16 @@ def test_valid_joined_skip_preserves_missing_session_error(
     request.assert_called_once_with("skip2")
 
 
-def test_spaced_skip_value_is_rejected(
+@pytest.mark.parametrize("command", ["next", "pause", "./ff20"])
+def test_non_argument_control_rejects_a_second_value(
+    command: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request = Mock()
     monkeypatch.setattr("cla.cli.send_command", request)
 
     with pytest.raises(SystemExit) as error:
-        main(["skip", "2"])
+        main([command, "2"])
 
     assert error.value.code == 2
     request.assert_not_called()
