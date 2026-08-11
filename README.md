@@ -54,6 +54,9 @@ Control the active playback session from any terminal:
 cla pause       # pause; repeated pauses are harmless
 cla play        # resume; repeated plays are harmless
 cla skip        # next track (alias: next)
+cla skip12      # jump to playlist entry 12
+cla skip+3      # jump forward three entries
+cla skip-2      # jump backward two entries
 cla back        # previous track (alias: prev)
 cla ff          # seek forward 10 seconds
 cla ff20        # seek forward 20 seconds
@@ -112,10 +115,18 @@ Candidates are fully probed before the live queue is changed; cancellation or a
 batch containing no playable files leaves the existing queue untouched. Concurrent
 additions and replacement launches are serialized. `kill` still stops playback and
 discards the queue.
-Navigation never wraps or changes the established playlist order. `skip` on
-the final track and `back` on the first track leave playback unchanged and
-print a clear message. Navigation, `replay`, and `restart` start the selected
-track from `00:00`, including when playback was paused.
+Navigation never wraps or changes the established playlist order. Append a
+positive one-based index directly to `skip` to select that queue entry, or use
+a joined `+` or `-` value to move relative to the current track. For example,
+`skip12`, `skip+3`, and `skip-2` are valid, while `skip 12` is not. The `next`
+alias remains a single-step command and does not accept numbered forms.
+
+Bare `skip` on the final track and `back` on the first track leave playback
+unchanged and print a clear message. A numbered skip that would land before
+entry 1 or after the final entry also leaves playback unchanged and prints
+`value is out of range`; jumps never wrap or clamp. Navigation, `replay`, and
+`restart` start the selected track from `00:00`, including when playback was
+paused. Selecting the current track by its absolute index restarts it.
 
 Seeking while paused keeps playback paused unless `ff` crosses the end of the
 track, in which case the next track starts at `00:00`. `rw` clamps at `00:00`
@@ -123,6 +134,9 @@ instead of selecting the previous track. Fast-forwarding beyond the final
 track stops playback. Append a positive whole number of seconds directly to
 `ff` or `rw` to choose the seek distance; without a number, the distance is 10
 seconds. Invalid or zero values, such as `ff0`, `rw-5`, or `ffabc`, are ignored.
+Invalid joined skip values are likewise silent no-ops. These include zero,
+signed zero, missing numbers, non-decimal values, repeated signs, and values
+larger than the supported command size. Skip numbers use ASCII decimal digits.
 `restart` and `replay` are equivalent for a single-file session. A control
 issued without an active session reports an error, except for `status` and
 `list`, which report an empty queue as described above.
@@ -134,9 +148,10 @@ Bare control names are reserved: `pause`, `play`, `skip`, `next`, `back`,
 `prev`, `ff`, `rw`, `replay`, `restart`, `kill`, and `status` always address
 the active playback session. `list` is reserved in the same way. Unqualified
 names beginning with `ff` or `rw` are also reserved for custom or invalid seek
-controls. To play a file or directory with one of those names, qualify it as a
-path, such as `./next`, `./list`, `./ff20`, `../next`, `album/next`, or an
-absolute path.
+controls. Unqualified names beginning with `skip` are reserved in the same way
+for valid or invalid skip controls. To play a file or directory with one of
+those names, qualify it as a path, such as `./next`, `./list`, `./ff20`,
+`./skip12`, `../next`, `album/next`, or an absolute path.
 
 Folder playback is non-recursive. It considers regular files with these
 case-insensitive extensions: `.wav`, `.mp3`, `.flac`, `.ogg`, `.aac`, and
@@ -221,6 +236,6 @@ uv run ruff format .
 ## To-do
 
 - [ ] [#20: Accept spaced arguments for `ff` and `rw` commands](https://github.com/tihnessa/cla/issues/20)
-- [ ] [#19: Extend `cla skip` with absolute and relative track jumps](https://github.com/tihnessa/cla/issues/19)
+- [x] [#19: Extend `cla skip` with absolute and relative track jumps](https://github.com/tihnessa/cla/issues/19)
 - [x] [#18: Add `cla list` command to display the current playlist](https://github.com/tihnessa/cla/issues/18)
 - [x] [#17: Add `cla add` command to append tracks to the current playlist](https://github.com/tihnessa/cla/issues/17)
