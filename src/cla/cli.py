@@ -873,7 +873,9 @@ def _add_source(argument: str) -> int:
 def _normalize_control_argv(argv: Sequence[str]) -> Sequence[str]:
     """Join spaced control values before argparse interprets option-like text."""
     if len(argv) == 2 and argv[0] in ARGUMENT_CONTROL_COMMANDS:
-        return (f"{argv[0]}{argv[1]}",)
+        # Keep an explicitly supplied empty value distinct from a bare command.
+        value = argv[1] or " "
+        return (f"{argv[0]}{value}",)
     return argv
 
 
