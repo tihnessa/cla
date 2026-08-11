@@ -40,6 +40,9 @@ def test_help_exits_successfully(capsys: pytest.CaptureFixture[str]) -> None:
     assert "ff[seconds]" in help_text
     assert "rw[seconds]" in help_text
     assert "skip[index|+/-offset]" in help_text
+    assert "ff [seconds]" in help_text
+    assert "rw [seconds]" in help_text
+    assert "skip [index|+/-offset]" in help_text
     assert "rew" not in help_text
 
 
