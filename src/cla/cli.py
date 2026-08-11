@@ -24,7 +24,9 @@ from cla.session import (
     QueueSnapshot,
     SessionDescriptor,
     is_seek_command,
+    is_skip_command,
     parse_seek_command,
+    parse_skip_command,
     playback_launch_lock,
     read_session,
     send_append,
@@ -74,8 +76,9 @@ def _parser() -> argparse.ArgumentParser:
         prog="cla",
         description="Play local audio in the background or control active playback.",
         epilog=(
-            "queue: add <path>; controls: pause, play, skip/next, back/prev, "
-            "ff[seconds], rw[seconds], replay, restart, kill, status, list"
+            "queue: add <path>; controls: pause, play, "
+            "skip[index|+/-offset]/next, back/prev, ff[seconds], rw[seconds], "
+            "replay, restart, kill, status, list"
         ),
     )
     parser.add_argument(
@@ -876,8 +879,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     argument = arguments.target
     unqualified_seek = Path(argument).name == argument and is_seek_command(argument)
-    if argument in CONTROL_COMMANDS or (
-        unqualified_seek and parse_seek_command(argument) is not None
+    unqualified_skip = Path(argument).name == argument and is_skip_command(argument)
+    if (
+        argument in CONTROL_COMMANDS
+        or (unqualified_seek and parse_seek_command(argument) is not None)
+        or (unqualified_skip and parse_skip_command(argument) is not None)
     ):
         response = _send_control(argument)
         if argument == "status":
@@ -909,7 +915,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if response.message is not None:
             print(f"cla: {response.message}")
         return 0
-    if unqualified_seek:
+    if unqualified_seek or unqualified_skip:
         return 0
 
     source, error = _resolve_source(argument)

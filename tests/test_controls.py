@@ -11,6 +11,7 @@ from cla.session import (
     PlaybackStatus,
     QueueSnapshot,
     SessionDescriptor,
+    parse_skip_command,
 )
 from cla.worker import PlaybackController, Track
 
@@ -95,6 +96,139 @@ def test_navigation_uses_ordered_snapshot_and_aliases(controller) -> None:
     boundary = player.handle("prev")
     assert boundary.ok
     assert boundary.message == "already on the first track"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("skip", ("next", 1)),
+        ("skip12", ("absolute", 12)),
+        ("skip+3", ("relative", 3)),
+        ("skip-2", ("relative", -2)),
+    ],
+)
+def test_skip_parser_accepts_bare_absolute_and_relative_forms(
+    command: str, expected: tuple[str, int]
+) -> None:
+    assert parse_skip_command(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "skip0",
+        "skip+0",
+        "skip-0",
+        "skip+",
+        "skip-",
+        "skip--2",
+        "skip++2",
+        "skipabc",
+        "skip1.5",
+        "skip１２",
+        "skip" + "9" * 5000,
+    ],
+)
+def test_skip_parser_rejects_invalid_or_oversized_forms(command: str) -> None:
+    assert parse_skip_command(command) is None
+
+
+def _jump_controller() -> tuple[PlaybackController, list[FakeProcess]]:
+    processes = []
+
+    def popen(*args, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    player = PlaybackController(
+        "/tools/ffplay",
+        [
+            Track(Path(f"track{index}.mp3"), track=index, disc=1, duration=60.0)
+            for index in range(1, 5)
+        ],
+        input_order_authoritative=True,
+        popen=popen,
+    )
+    assert player.start().ok
+    return player, processes
+
+
+def test_absolute_and_relative_skip_jumps_select_from_zero() -> None:
+    player, processes = _jump_controller()
+
+    assert player.handle("skip3").ok
+    assert player.index == 2
+    assert player.offset == 0
+    assert processes[-1] is player.process
+
+    player.handle("pause")
+    assert player.handle("skip-2").ok
+    assert player.index == 0
+    assert player.offset == 0
+    assert not player.paused
+
+    assert player.handle("skip+3").ok
+    assert player.index == 3
+
+
+def test_absolute_skip_to_current_track_restarts_it() -> None:
+    player, processes = _jump_controller()
+    assert player.handle("skip3").ok
+    current_process = player.process
+
+    assert player.handle("skip3").ok
+
+    assert current_process is not None
+    assert current_process.terminated
+    assert player.index == 2
+    assert player.offset == 0
+    assert player.process is processes[-1]
+    assert player.process is not current_process
+
+
+@pytest.mark.parametrize("command", ["skip5", "skip-1", "skip+4"])
+def test_out_of_range_skip_leaves_playback_unchanged(command: str) -> None:
+    player, processes = _jump_controller()
+    process = player.process
+
+    response = player.handle(command)
+
+    assert response == ControlResponse(True, "value is out of range")
+    assert player.index == 0
+    assert player.offset == 0
+    assert not player.paused
+    assert player.process is process
+    assert process is not None
+    assert not process.terminated
+    assert len(processes) == 1
+
+
+def test_out_of_range_relative_skip_from_final_track_does_not_wrap() -> None:
+    player, processes = _jump_controller()
+    assert player.handle("skip4").ok
+    process = player.process
+
+    response = player.handle("skip+1")
+
+    assert response == ControlResponse(True, "value is out of range")
+    assert player.index == 3
+    assert player.process is process
+    assert process is not None
+    assert not process.terminated
+    assert len(processes) == 2
+
+
+def test_invalid_joined_skip_is_a_silent_worker_no_op() -> None:
+    player, processes = _jump_controller()
+    process = player.process
+
+    assert player.handle("skip0") == ControlResponse(True)
+    assert player.index == 0
+    assert player.process is process
+    assert process is not None
+    assert not process.terminated
+    assert len(processes) == 1
 
 
 def test_pause_and_play_are_distinct_silent_idempotent_operations(controller) -> None:
@@ -521,11 +655,52 @@ def test_custom_seek_command_wins_over_a_colliding_file(
     request.assert_called_once_with(command)
 
 
+@pytest.mark.parametrize("command", ["skip2", "skip+3", "skip-1"])
+def test_valid_joined_skip_command_wins_over_a_colliding_file(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / command).touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock(return_value=ControlResponse(True))
+    monkeypatch.setattr("cla.cli.send_command", request)
+
+    assert main([command]) == 0
+    request.assert_called_once_with(command)
+
+
 @pytest.mark.parametrize(
     "command",
     ["ff0", "rw0", "ff-5", "rwabc", "ff1.5", "ff" + "9" * 5000],
 )
 def test_invalid_custom_seek_is_ignored_before_filesystem_handling(
+    command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if len(command) < 100:
+        (tmp_path / command).touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock()
+    tools = Mock(side_effect=AssertionError("filesystem handling was reached"))
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr("cla.cli._tools", tools)
+
+    assert main([command]) == 0
+    request.assert_not_called()
+    tools.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "skip0",
+        "skip+0",
+        "skip-0",
+        "skip+",
+        "skip--2",
+        "skipabc",
+        "skip" + "9" * 5000,
+    ],
+)
+def test_invalid_joined_skip_is_ignored_before_filesystem_handling(
     command: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if len(command) < 100:
@@ -559,6 +734,44 @@ def test_qualified_custom_seek_name_remains_a_filesystem_target(
     request.assert_not_called()
 
 
+def test_qualified_joined_skip_name_remains_a_filesystem_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "skip2").touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock()
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr(
+        "cla.cli._tools", Mock(return_value=(None, None, "filesystem target"))
+    )
+
+    assert main(["./skip2"]) == 1
+    assert "filesystem target" in capsys.readouterr().err
+    request.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["next3", "next+3"])
+def test_numbered_next_aliases_remain_filesystem_targets(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / command).touch()
+    monkeypatch.chdir(tmp_path)
+    request = Mock()
+    monkeypatch.setattr("cla.cli.send_command", request)
+    monkeypatch.setattr(
+        "cla.cli._tools", Mock(return_value=(None, None, "filesystem target"))
+    )
+
+    assert main([command]) == 1
+    assert "filesystem target" in capsys.readouterr().err
+    request.assert_not_called()
+
+
 def test_cli_prints_boundary_and_reports_missing_session(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -575,6 +788,34 @@ def test_cli_prints_boundary_and_reports_missing_session(
     )
     assert main(["pause"]) == 1
     assert "no active playback session" in capsys.readouterr().err
+
+
+def test_valid_joined_skip_preserves_missing_session_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    request = Mock(
+        return_value=ControlResponse(
+            False, "no active playback session", unavailable=True
+        )
+    )
+    monkeypatch.setattr("cla.cli.send_command", request)
+
+    assert main(["skip2"]) == 1
+    assert "no active playback session" in capsys.readouterr().err
+    request.assert_called_once_with("skip2")
+
+
+def test_spaced_skip_value_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = Mock()
+    monkeypatch.setattr("cla.cli.send_command", request)
+
+    with pytest.raises(SystemExit) as error:
+        main(["skip", "2"])
+
+    assert error.value.code == 2
+    request.assert_not_called()
 
 
 def test_cli_prints_status_and_treats_an_empty_queue_as_success(

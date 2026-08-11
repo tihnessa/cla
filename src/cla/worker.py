@@ -25,8 +25,10 @@ from cla.session import (
     clear_session,
     encode_response,
     is_seek_command,
+    is_skip_command,
     new_token,
     parse_seek_command,
+    parse_skip_command,
     publish_session,
 )
 
@@ -246,13 +248,19 @@ class PlaybackController:
     def handle(self, command: str) -> ControlResponse:
         """Apply one public playback command."""
         seek = parse_seek_command(command)
+        skip = parse_skip_command(command)
         canonical = COMMAND_ALIASES.get(command)
         if canonical is None:
-            if not is_seek_command(command):
+            if is_skip_command(command):
+                if skip is None:
+                    return ControlResponse(True)
+                canonical = "skip"
+            elif not is_seek_command(command):
                 return ControlResponse(False, "unknown playback command")
-            if seek is None:
-                return ControlResponse(True)
-            canonical = seek[0]
+            else:
+                if seek is None:
+                    return ControlResponse(True)
+                canonical = seek[0]
         if canonical == "status":
             return ControlResponse(
                 True,
@@ -285,6 +293,18 @@ class PlaybackController:
                 return ControlResponse(True)
             self.paused = False
             return self._launch()
+        if canonical == "skip":
+            assert skip is not None
+            kind, value = skip
+            destination = value - 1 if kind == "absolute" else self.index + value
+            if not 0 <= destination < len(self.tracks):
+                message = (
+                    "already on the last track"
+                    if kind == "next"
+                    else "value is out of range"
+                )
+                return ControlResponse(True, message)
+            return self._select(destination)
         if canonical == "next":
             if self.index == len(self.tracks) - 1:
                 return ControlResponse(True, "already on the last track")

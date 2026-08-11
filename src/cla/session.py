@@ -26,7 +26,7 @@ APPEND_PROBE_TIMEOUT_SECONDS = 10.0
 WINDOWS_LOCK_RETRY_SECONDS = 0.05
 COMMAND_ALIASES = {
     "kill": "kill",
-    "skip": "next",
+    "skip": "skip",
     "next": "next",
     "back": "prev",
     "prev": "prev",
@@ -41,14 +41,20 @@ COMMAND_ALIASES = {
 }
 CONTROL_COMMANDS = frozenset(COMMAND_ALIASES)
 SEEK_COMMANDS = ("ff", "rw")
+SKIP_COMMAND = "skip"
 DEFAULT_SEEK_SECONDS = 10
 # Leave room for the token and JSON envelope in a control-protocol message.
-MAX_SEEK_COMMAND_BYTES = MAX_MESSAGE_BYTES - 128
+MAX_CUSTOM_COMMAND_BYTES = MAX_MESSAGE_BYTES - 128
 
 
 def is_seek_command(command: str) -> bool:
     """Return whether an unqualified token is reserved for seeking."""
     return command.startswith(SEEK_COMMANDS)
+
+
+def is_skip_command(command: str) -> bool:
+    """Return whether an unqualified token is reserved for skip navigation."""
+    return command.startswith(SKIP_COMMAND)
 
 
 def parse_seek_command(command: str) -> Optional[tuple[str, int]]:
@@ -63,12 +69,37 @@ def parse_seek_command(command: str) -> Optional[tuple[str, int]]:
             not suffix
             or not suffix.isascii()
             or not suffix.isdecimal()
-            or len(command.encode("ascii")) > MAX_SEEK_COMMAND_BYTES
+            or len(command.encode("ascii")) > MAX_CUSTOM_COMMAND_BYTES
         ):
             return None
         seconds = int(suffix)
         return (direction, seconds) if seconds > 0 else None
     return None
+
+
+def parse_skip_command(command: str) -> Optional[tuple[str, int]]:
+    """Parse a skip token into bare-next, absolute, or relative navigation."""
+    if command == SKIP_COMMAND:
+        return "next", 1
+    if not command.startswith(SKIP_COMMAND) or not command.isascii():
+        return None
+    if len(command.encode("ascii")) > MAX_CUSTOM_COMMAND_BYTES:
+        return None
+
+    suffix = command[len(SKIP_COMMAND) :]
+    kind = "absolute"
+    sign = 1
+    if suffix.startswith(("+", "-")):
+        kind = "relative"
+        if suffix[0] == "-":
+            sign = -1
+        suffix = suffix[1:]
+    if not suffix or not suffix.isdecimal():
+        return None
+    value = int(suffix)
+    if value == 0:
+        return None
+    return kind, sign * value
 
 
 @dataclass(frozen=True)
